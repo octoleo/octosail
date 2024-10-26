@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+
+# The most recent program version.
+_VERSION="1.0.0"
+_V="1.0"
+
+# Bash version required
+_bash_v=4
+
+# The program full name
+PROGRAM_NAME="Octosail"
+
+###############################################################################
+# Initial checks: AWS CLI installation and configuration
+###############################################################################
+
+# Function to check if AWS CLI is installed
+function check_aws_cli_installed() {
+    if ! command -v aws &> /dev/null; then
+        echo "AWS CLI is not installed."
+        read -p "Do you want to install it now? (y/n): " install_aws
+        if [[ "$install_aws" =~ ^[Yy]$ ]]; then
+            echo "Installing AWS CLI..."
+            # Detect OS and architecture
+            if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+                # For Linux
+                ARCH=$(uname -m)
+                if [[ "$ARCH" == "x86_64" ]]; then
+                    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                elif [[ "$ARCH" == "aarch64" ]]; then
+                    curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+                else
+                    echo "Unsupported architecture: $ARCH"
+                    return 1
+                fi
+                unzip awscliv2.zip
+                sudo ./aws/install
+                rm -rf awscliv2.zip aws/
+            elif [[ "$OSTYPE" == "darwin"* ]]; then
+                # For macOS
+                ARCH=$(uname -m)
+                if [[ "$ARCH" == "x86_64" || "$ARCH" == "arm64" ]]; then
+                    curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
+                    sudo installer -pkg AWSCLIV2.pkg -target /
+                    rm AWSCLIV2.pkg
+                else
+                    echo "Unsupported architecture: $ARCH"
+                    return 1
+                fi
+            else
+                echo "Unsupported OS: $OSTYPE"
+                return 1
+            fi
+
+            # Check again if AWS CLI is installed
+            if ! command -v aws &> /dev/null; then
+                echo "Installation failed. Please install AWS CLI manually."
+                return 1
+            fi
+        else
+            echo "Cannot proceed without AWS CLI installed. Exiting."
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Function to check if AWS CLI is configured
+function check_aws_cli_configured() {
+    if ! aws sts get-caller-identity &> /dev/null; then
+        echo "AWS CLI is not configured."
+        read -p "Do you want to configure it now? (y/n): " configure_aws
+        if [[ "$configure_aws" =~ ^[Yy]$ ]]; then
+            echo "Running 'aws configure'..."
+            aws configure
+            # Check again if AWS CLI is configured
+            if ! aws sts get-caller-identity &> /dev/null; then
+                echo "Configuration failed or incomplete. Please configure AWS CLI manually."
+                return 1
+            fi
+        else
+            echo "Cannot proceed without AWS CLI configured. Exiting."
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Perform the checks
+check_aws_cli_installed || exit 1
+check_aws_cli_configured || exit 1
+
+###############################################################################
+# function lightsail_stop_instance
+#
+# This function stops a single Amazon Lightsail instance.
+#
+# Parameters:
+#       -n instance_name - The NAME of the instance to stop.
+#       -h - Display help.
+#
+# Returns:
+#       0 - If successful.
+#       1 - If it fails.
+###############################################################################
+function lightsail_stop_instance() {
+    local instance_name
+    local option OPTARG
+
+    function usage() {
+        echo "function lightsail_stop_instance"
+        echo "Stops a single Amazon Lightsail instance."
+        echo "  -n instance_name - The NAME of the instance to stop."
+        echo "  -h - Display help."
+        echo ""
+    }
+
+    while getopts "n:h" option; do
+        case "${option}" in
+            n) instance_name="${OPTARG}" ;;
+            h)
+                usage
+                return 0
+                ;;
+            \?)
+                echo "Invalid parameter"
+                usage
+                return 1
+                ;;
+        esac
+    done
+    export OPTIND=1
+
+    if [[ -z "$instance_name" ]]; then
+        echo "ERROR: You must provide an instance name with the -n parameter."
+        usage
+        return 1
+    fi
+
+    response=$(aws lightsail stop-instance --instance-name "${instance_name}") || {
+        echo "ERROR: AWS reports stop-instance operation failed with $response."
+        return 1
+    }
+
+    return 0
+}
+
+###############################################################################
+# function lightsail_start_instance
+#
+# This function starts a single Amazon Lightsail instance.
+#
+# Parameters:
+#       -n instance_name - The NAME of the instance to start.
+#       -h - Display help.
+#
+# Returns:
+#       0 - If successful.
+#       1 - If it fails.
+###############################################################################
+function lightsail_start_instance() {
+    local instance_name
+    local option OPTARG
+
+    function usage() {
+        echo "function lightsail_start_instance"
+        echo "Starts a single Amazon Lightsail instance."
+        echo "  -n instance_name - The NAME of the instance to start."
+        echo "  -h - Display help."
+        echo ""
+    }
+
+    while getopts "n:h" option; do
+        case "${option}" in
+            n) instance_name="${OPTARG}" ;;
+            h)
+                usage
+                return 0
+                ;;
+            \?)
+                echo "Invalid parameter"
+                usage
+                return 1
+                ;;
+        esac
+    done
+    export OPTIND=1
+
+    if [[ -z "$instance_name" ]]; then
+        echo "ERROR: You must provide an instance name with the -n parameter."
+        usage
+        return 1
+    fi
+
+    response=$(aws lightsail start-instance --instance-name "${instance_name}") || {
+        echo "ERROR: AWS reports start-instance operation failed with $response."
+        return 1
+    }
+
+    return 0
+}
+
+###############################################################################
+# function lightsail_reboot_instance
+#
+# This function reboots a single Amazon Lightsail instance.
+#
+# Parameters:
+#       -n instance_name - The NAME of the instance to reboot.
+#       -h - Display help.
+#
+# Returns:
+#       0 - If successful.
+#       1 - If it fails.
+###############################################################################
+function lightsail_reboot_instance() {
+    local instance_name
+    local option OPTARG
+
+    function usage() {
+        echo "function lightsail_reboot_instance"
+        echo "Reboots a single Amazon Lightsail instance."
+        echo "  -n instance_name - The NAME of the instance to reboot."
+        echo "  -h - Display help."
+        echo ""
+    }
+
+    while getopts "n:h" option; do
+        case "${option}" in
+            n) instance_name="${OPTARG}" ;;
+            h)
+                usage
+                return 0
+                ;;
+            \?)
+                echo "Invalid parameter"
+                usage
+                return 1
+                ;;
+        esac
+    done
+    export OPTIND=1
+
+    if [[ -z "$instance_name" ]]; then
+        echo "ERROR: You must provide an instance name with the -n parameter."
+        usage
+        return 1
+    fi
+
+    # Stop the instance
+    lightsail_stop_instance -n "${instance_name}" || {
+        echo "ERROR: Failed to stop the instance."
+        return 1
+    }
+
+    # Poll the status until it's 'stopped'
+    local state=""
+    echo "Waiting for the instance to stop..."
+    while true; do
+        state=$(aws lightsail get-instance-state --instance-name "${instance_name}" --query 'state.name' --output text) || {
+            echo "ERROR: Failed to get instance state."
+            return 1
+        }
+        if [[ "$state" == "stopped" ]]; then
+            echo "Instance has stopped."
+            break
+        else
+            echo "Current state: $state. Waiting..."
+            sleep 5
+        fi
+    done
+
+    # Wait for 1 minute
+    echo "Waiting for 1 minute before starting the instance..."
+    sleep 60
+
+    # Start the instance
+    lightsail_start_instance -n "${instance_name}" || {
+        echo "ERROR: Failed to start the instance."
+        return 1
+    }
+
+    echo "Instance rebooted successfully."
+
+    return 0
+}
+
+###############################################################################
+# Main script logic to handle --stop, --start, and --reboot directly for Lightsail.
+###############################################################################
+if [[ "$1" == "--stop" && -n "$2" ]]; then
+    lightsail_stop_instance -n "$2"
+    exit $?
+elif [[ "$1" == "--start" && -n "$2" ]]; then
+    lightsail_start_instance -n "$2"
+    exit $?
+elif [[ "$1" == "--reboot" && -n "$2" ]]; then
+    lightsail_reboot_instance -n "$2"
+    exit $?
+else
+    echo "Usage: $0 --stop <instance_name> | --start <instance_name> | --reboot <instance_name>"
+    echo "       - Stops, starts, or reboots the specified Lightsail instance."
+    exit 1
+fi
+
