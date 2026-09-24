@@ -64,7 +64,13 @@ jobs:
 
       - name: Install bats (macOS)
         if: runner.os == 'macOS'
-        run: brew install bats-core bash jq
+        run: |
+          brew install bats-core bash jq
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m pip install --user --break-system-packages pyyaml \
+              || python3 -m pip install --user pyyaml
+          fi
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
 
       - name: Tool versions
         run: |

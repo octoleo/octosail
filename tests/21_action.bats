@@ -124,7 +124,14 @@ sys.exit(1 if problems else 0)
 PY
 }
 
+# require_pyyaml : the static action.yml checks parse YAML with python3 + PyYAML; CI installs it on
+# every platform, a developer machine without it skips these tests with a hint.
+require_pyyaml() {
+  python3 -c 'import yaml' 2> /dev/null || skip "python3 with PyYAML is required for the action.yml checks (pip install pyyaml)"
+}
+
 check_action() {
+  require_pyyaml
   run --separate-stderr python3 "$CHECK_PY" "$ACTION_YML" "$@"
 }
 
@@ -204,6 +211,7 @@ check_action() {
 }
 
 @test "action.yml: the script's env twins cover every input env line" {
+  require_pyyaml
   local name var
   while IFS= read -r name; do
     case $name in

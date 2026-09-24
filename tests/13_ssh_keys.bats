@@ -457,7 +457,7 @@ mock_host_key_blob() {
   done
   # an empty known_hosts file is created in the run dir for ssh to fill
   [[ ${lines[0]} == "$OCTOSAIL_TMPDIR"/octosail.*/known_hosts ]]
-  [[ ${lines[1]} == 0 ]]
+  [[ ${lines[1]//[[:space:]]/} == 0 ]]   # BSD wc pads the count with spaces
 }
 
 @test "hostkeys: accept-new with the Lightsail key fetches the access details once (for the key only)" {
