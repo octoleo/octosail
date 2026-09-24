@@ -1,0 +1,15 @@
+# ShellCheck configuration for octosail. Everything is on, then a short list
+# of optional checks is switched off; each line says why.
+shell=bash
+source-path=SCRIPTDIR
+enable=all
+# SC2250 require-variable-braces: "$var" is idiomatic; braces are used only where they matter.
+disable=SC2250
+# SC2312 check-extra-masked-returns: `set -o pipefail` and explicit `|| true` already handle masked pipeline/substitution returns.
+disable=SC2312
+# SC2310 check-set-e-suppressed: `if fn; then` is the intended control flow; functions return status on purpose.
+disable=SC2310
+# SC2311 check-set-e-suppressed for `x=$(fn)`: same reasoning; command substitutions are checked by their callers.
+disable=SC2311
+# SC2249 add-default-case: `case` statements that intentionally ignore other values need no `*)` arm.
+disable=SC2249

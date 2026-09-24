@@ -1,0 +1,53 @@
+# Credentials through GitHub OIDC: no long-lived AWS keys in secrets. The
+# workflow assumes an IAM role (AWS_ROLE_ARN) whose trust policy allows this
+# repository, then inspects an instance and runs a command on it.
+# Pin @v2.0.0 instead of @v2 for reproducible builds.
+name: Lightsail with OIDC credentials
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: Instance name
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: octosail-${{ github.run_id }}
+          aws-region: eu-west-1
+
+      - name: Instance status
+        id: status
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: status
+          name: ${{ inputs.name }}
+
+      - name: Uptime and disk usage
+        id: exec
+        if: steps.status.outputs.state == 'running'
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: exec
+          name: ${{ inputs.name }}
+          script: |
+            uptime
+            df -h /
+
+      - name: Report
+        env:
+          STATE: ${{ steps.status.outputs.state }}
+          PUBLIC_IP: ${{ steps.status.outputs.public_ip }}
+          BUNDLE: ${{ steps.status.outputs.bundle_id }}
+          EXIT_CODE: ${{ steps.exec.outputs.exit_code }}
+        run: |
+          echo "state=$STATE ip=$PUBLIC_IP bundle=$BUNDLE exec-exit=${EXIT_CODE:-skipped}"

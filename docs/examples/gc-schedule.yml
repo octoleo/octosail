@@ -1,0 +1,47 @@
+# Cleanup layer C: an hourly garbage collector that deletes every
+# octosail-managed instance whose octosail:expires-at tag is in the past.
+# Add this to every repository that uses split steps (layer B), because a
+# runner that dies without delivering a signal cannot run its delete step.
+# Pin @v2.0.0 instead of @v2 for reproducible builds.
+name: Lightsail garbage collection
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Only list what would be deleted
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Delete expired instances
+        id: gc
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: gc
+          dry-run: ${{ inputs.dry-run == true && 'true' || '' }}
+
+      - name: Report
+        env:
+          DELETED_COUNT: ${{ steps.gc.outputs.deleted_count }}
+          DELETED_NAMES: ${{ steps.gc.outputs.deleted_names }}
+          FAILED_NAMES: ${{ steps.gc.outputs.failed_names }}
+        run: |
+          echo "deleted $DELETED_COUNT instance(s): $DELETED_NAMES"
+          if [ -n "$FAILED_NAMES" ]; then
+            echo "::warning::gc could not delete: $FAILED_NAMES"
+          fi

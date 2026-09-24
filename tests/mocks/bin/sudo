@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Mock sudo for installer tests: records "sudo <args>" to $MOCK_LOG, then
+# drops the leading -n/-H/-E/-- flags and runs the rest of the command so
+# that "sudo -n true" and "sudo -n apt-get ..." both work.
+set -euo pipefail
+if [[ -n ${MOCK_LOG:-} ]]; then
+  mkdir -p "$(dirname "$MOCK_LOG")"
+  printf 'sudo %s\n' "$*" >> "$MOCK_LOG"
+fi
+while (($#)); do
+  case $1 in
+    --) shift; break ;;
+    -n|-H|-E|-S|-b|-i|-s|-k) shift ;;
+    -u|-g|-p|-C|-D|-r|-t|-U|-h) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+(($#)) || exit 0
+exec "$@"

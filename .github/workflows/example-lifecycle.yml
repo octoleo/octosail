@@ -1,0 +1,83 @@
+# Copy-ready example: create a Lightsail box, run this repository's test suite
+# on it, collect the log and tear the box down - all in one `run` step.
+# Requires an OIDC role in the AWS_ROLE_ARN secret (see docs/iam-policy.json).
+# When copying into your own repository replace `uses: ./` with
+# `uses: octoleo/octosail@v2` (or pin @v2.0.0 for reproducibility).
+name: Lightsail lifecycle example
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle:
+        description: Bundle id
+        default: nano_3_0
+      region:
+        description: AWS region
+        default: eu-west-1
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  box:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Create, test, tear down
+        id: box
+        uses: ./ # octoleo/octosail@v2 when copied
+        continue-on-error: true
+        with:
+          command: run
+          name: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          bundle: ${{ inputs.bundle }}
+          region: ${{ inputs.region }}
+          ttl: 2h
+          open-ports: 22/tcp
+          env: |
+            TERM=dumb
+          upload: |
+            ./src:/home/ubuntu/src
+            ./tests:/home/ubuntu/tests
+          script: |
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bats jq
+            mkdir -p /home/ubuntu/octosail
+            mv /home/ubuntu/src /home/ubuntu/tests /home/ubuntu/octosail/
+            cd /home/ubuntu/octosail
+            bats -r tests 2>&1 | tee /home/ubuntu/result.log
+          download: |
+            /home/ubuntu/result.log:./result.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result
+          path: result.log
+          if-no-files-found: warn
+
+      - name: Belt and braces
+        if: always()
+        uses: ./ # octoleo/octosail@v2 when copied
+        with:
+          command: delete
+          name: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          region: ${{ inputs.region }}
+
+      - name: Assert the remote run succeeded
+        env:
+          EXIT_CODE: ${{ steps.box.outputs.exit_code }}
+          EXIT_NAME: ${{ steps.box.outputs.exit_name }}
+          PUBLIC_IP: ${{ steps.box.outputs.public_ip }}
+          DELETED: ${{ steps.box.outputs.deleted }}
+        run: |
+          set -euo pipefail
+          echo "remote exit $EXIT_CODE ($EXIT_NAME) on $PUBLIC_IP, deleted=$DELETED"
+          test "$EXIT_CODE" = "0"

@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# Mock ssh for the octosail test-suite.  Nothing is connected to; the
+# "remote" is a local directory ($MOCK_REMOTE_HOME) and the command is run
+# locally with the fake remote tools of tests/mocks/remote-bin on PATH.
+#
+# Every call appends one JSON line to $MOCK_SSH_LOG:
+#   {tool,host,user,port,options,key_file,cert_file,known_hosts,strict,sudo,command,cwd}
+# and one text line to $MOCK_SSH_VIOLATIONS for every hardening rule the
+# call breaks (see tests/mocks/README.md).  See the README for MOCK_SSH_* knobs.
+set -euo pipefail
+
+if [[ -z ${MOCK_STATE_DIR:-} ]]; then
+  echo "mock ssh used outside tests" >&2
+  exit 97
+fi
+TOOL=ssh
+ARGV=("$@")
+MOCK_REMOTE_HOME=${MOCK_REMOTE_HOME:-$MOCK_STATE_DIR/remote-home}
+mkdir -p "$MOCK_STATE_DIR/counters" "$MOCK_REMOTE_HOME"
+
+# ---------------------------------------------------------------------------
+# argument parsing:  ssh [-o opt]... [-i key] [-p port] [--] user@host [--] cmd...
+# ---------------------------------------------------------------------------
+declare -a OPTS=() CMD=()
+KEY="" PORT=22 KEY_GIVEN=false LOGIN_USER=""
+while (($#)); do
+  case $1 in
+    -o) OPTS+=("${2:-}"); shift 2 ;;
+    -o?*) OPTS+=("${1#-o}"); shift ;;
+    -i) KEY=${2:-}; KEY_GIVEN=true; shift 2 ;;
+    -i?*) KEY=${1#-i}; KEY_GIVEN=true; shift ;;
+    -p) PORT=${2:-22}; shift 2 ;;
+    -p?*) PORT=${1#-p}; shift ;;
+    -l) LOGIN_USER=${2:-}; shift 2 ;;
+    -l?*) LOGIN_USER=${1#-l}; shift ;;
+    -F|-J|-L|-R|-D|-W|-E|-b|-c|-e|-m|-O|-Q|-S|-w|-I|-B) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+TARGET=${1:-}
+if [[ -z $TARGET ]]; then
+  echo "usage: ssh [options] [user@]hostname [command]" >&2
+  exit 255
+fi
+shift
+[[ ${1:-} == -- ]] && shift
+CMD=("$@")
+
+if [[ $TARGET == *@* ]]; then
+  USER_NAME=${TARGET%%@*}
+  HOST=${TARGET#*@}
+else
+  USER_NAME=${LOGIN_USER:-$(id -un)}
+  HOST=$TARGET
+fi
+[[ -n $LOGIN_USER ]] && USER_NAME=$LOGIN_USER
+
+# case-insensitive lookup of an -o option (OpenSSH option names are case-insensitive)
+opt_get() {
+  local want=${1,,} o k
+  for o in "${OPTS[@]+"${OPTS[@]}"}"; do
+    k=${o%%=*}
+    if [[ ${k,,} == "$want" ]]; then printf '%s' "${o#*=}"; return 0; fi
+  done
+  return 1
+}
+BATCH=$(opt_get BatchMode || true)
+IDONLY=$(opt_get IdentitiesOnly || true)
+KNOWN_HOSTS=$(opt_get UserKnownHostsFile || true)
+STRICT=$(opt_get StrictHostKeyChecking || true)
+CERT=$(opt_get CertificateFile || true)
+
+SUDO=false
+declare -a RUN_CMD=("${CMD[@]+"${CMD[@]}"}")
+if [[ ${RUN_CMD[0]:-} == sudo ]]; then
+  SUDO=true
+  RUN_CMD=("${RUN_CMD[@]:1}")
+  while [[ ${RUN_CMD[0]:-} == -* ]]; do
+    if [[ ${RUN_CMD[0]} == -- ]]; then RUN_CMD=("${RUN_CMD[@]:1}"); break; fi
+    RUN_CMD=("${RUN_CMD[@]:1}")
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# logging and hardening checks
+# ---------------------------------------------------------------------------
+if [[ -n ${MOCK_SSH_LOG:-} ]]; then
+  mkdir -p "$(dirname "$MOCK_SSH_LOG")"
+  opts_json=$(jq -cn '$ARGS.positional | map(capture("^(?<key>[^=]*)=?(?<value>.*)$")) | from_entries' --args -- "${OPTS[@]+"${OPTS[@]}"}")
+  jq -cn --arg tool "$TOOL" --arg host "$HOST" --arg user "$USER_NAME" --arg port "$PORT" --argjson options "$opts_json" \
+    --arg key "$KEY" --arg cert "$CERT" --arg kh "$KNOWN_HOSTS" --arg strict "$STRICT" --argjson sudo "$SUDO" --arg cwd "$PWD" \
+    '{tool: $tool, host: $host, user: $user, port: ($port | tonumber? // $port), options: $options, key_file: $key,
+      cert_file: $cert, known_hosts: $kh, strict: $strict, sudo: $sudo, command: $ARGS.positional, cwd: $cwd}' \
+    --args -- "${CMD[@]+"${CMD[@]}"}" >> "$MOCK_SSH_LOG"
+fi
+
+file_mode() { # octal permission bits of a file, portable across GNU and BSD stat
+  local m
+  if m=$(stat -c '%a' "$1" 2> /dev/null); then printf '%s' "$m"; return 0; fi
+  if m=$(stat -f '%Lp' "$1" 2> /dev/null); then printf '%s' "$m"; return 0; fi
+  return 1
+}
+violate() {
+  [[ -n ${MOCK_SSH_VIOLATIONS:-} ]] || return 0
+  mkdir -p "$(dirname "$MOCK_SSH_VIOLATIONS")"
+  printf '%s: %s | argv: %s\n' "$TOOL" "$1" "${ARGV[*]}" >> "$MOCK_SSH_VIOLATIONS"
+}
+if [[ $KEY_GIVEN != true ]]; then
+  violate "missing -i identity file"
+elif [[ ! -f $KEY ]]; then
+  violate "identity file does not exist: $KEY"
+else
+  mode=$(file_mode "$KEY" || echo unknown)
+  [[ $mode == 600 ]] || violate "identity file mode is $mode, expected 600: $KEY"
+fi
+[[ ${BATCH,,} == yes ]] || violate "BatchMode=yes missing"
+[[ ${IDONLY,,} == yes ]] || violate "IdentitiesOnly=yes missing"
+if [[ -z $KNOWN_HOSTS ]]; then
+  violate "UserKnownHostsFile missing"
+elif [[ $KNOWN_HOSTS != /dev/null ]]; then
+  if [[ ! -e $KNOWN_HOSTS ]]; then
+    [[ ${STRICT,,} == yes ]] && violate "UserKnownHostsFile does not exist while StrictHostKeyChecking=yes: $KNOWN_HOSTS"
+  elif [[ ! -r $KNOWN_HOSTS ]]; then
+    violate "UserKnownHostsFile is not readable: $KNOWN_HOSTS"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# injected failures
+# ---------------------------------------------------------------------------
+truthy() { [[ -n ${1:-} && $1 != 0 && $1 != false ]]; }
+if truthy "${MOCK_SSH_AUTH_FAIL:-}"; then
+  printf '%s@%s: Permission denied (publickey).\n' "$USER_NAME" "$HOST" >&2
+  exit 255
+fi
+if truthy "${MOCK_SSH_HOSTKEY_MISMATCH:-}"; then
+  cat >&2 <<'MSG'
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+Host key verification failed.
+MSG
+  exit 255
+fi
+if truthy "${MOCK_SSH_ALWAYS_FAIL:-}"; then
+  printf 'ssh: connect to host %s port %s: Connection timed out\n' "$HOST" "$PORT" >&2
+  exit 255
+fi
+
+counter_next() {
+  local f=$MOCK_STATE_DIR/counters/$1 n=0
+  [[ -f $f ]] && n=$(cat "$f")
+  n=$((n + 1))
+  printf '%s' "$n" > "$f"
+  printf '%s\n' "$n"
+}
+
+# readiness probe: "true"
+if [[ ${#CMD[@]} -eq 1 && ${CMD[0]} == true ]]; then
+  n=$(counter_next ssh_probe)
+  if ((n <= ${MOCK_SSH_FAIL_UNTIL:-0})); then
+    printf 'ssh: connect to host %s port %s: Connection refused\n' "$HOST" "$PORT" >&2
+    exit 255
+  fi
+  exit 0
+fi
+
+# reboot check: "cat /proc/sys/kernel/random/boot_id"
+if [[ ${#RUN_CMD[@]} -eq 2 && ${RUN_CMD[0]} == cat && ${RUN_CMD[1]} == /proc/sys/kernel/random/boot_id ]]; then
+  n=$(counter_next boot_id)
+  if ((n <= ${MOCK_BOOT_CHANGE_AFTER:-1})); then
+    printf 'boot-id-1\n'
+  else
+    printf 'boot-id-2\n'
+  fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# run the command locally, script body from stdin
+# ---------------------------------------------------------------------------
+if ((${#RUN_CMD[@]} == 0)); then
+  echo "mock ssh: no command given (interactive sessions are not supported)" >&2
+  exit 255
+fi
+script=$MOCK_REMOTE_HOME/.last-script
+cat > "$script"
+{
+  printf '%s\n' "----- octosail-mock-script $(counter_next script) -----"
+  cat "$script"
+} >> "$MOCK_REMOTE_HOME/.all-scripts"
+
+if [[ -n ${MOCK_SSH_SLEEP:-} && ${MOCK_SSH_SLEEP} != 0 ]]; then
+  # stdout/stderr detached so an orphaned sleep never holds the caller's pipes open
+  sleep "$MOCK_SSH_SLEEP" > /dev/null 2>&1
+fi
+
+remote_bin=$(cd "$(dirname "${BASH_SOURCE[0]}")/../remote-bin" && pwd)
+if [[ ${CLOUD_INIT_MOCK_STATUS:-} == absent ]]; then
+  # "absent": no cloud-init anywhere on the remote PATH (drop host dirs that carry one too)
+  new_path=""
+  IFS=: read -r -a path_parts <<< "$PATH"
+  for d in "${path_parts[@]}"; do
+    [[ -n $d ]] || continue
+    [[ -x $d/cloud-init ]] && continue
+    new_path+="${new_path:+:}$d"
+  done
+  PATH="$new_path"
+else
+  PATH="$remote_bin:$PATH"
+fi
+export PATH
+export HOME="$MOCK_REMOTE_HOME"
+export MOCK_REMOTE_HOME
+cd "$MOCK_REMOTE_HOME"
+exec "${RUN_CMD[@]}" < "$script"

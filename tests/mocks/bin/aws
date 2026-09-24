@@ -1,0 +1,1040 @@
+#!/usr/bin/env bash
+# Mock AWS CLI for the octosail test-suite (bash + jq only; no network, no sleeps).
+#
+# Refuses to run unless MOCK_STATE_DIR is set (exit 97).  Only the services
+# "lightsail" and "sts" are served (anything else: exit 99); any "--query"
+# argument is a bug in the caller (exit 98); an operation this mock does not
+# know is reported as "Unknown mock operation <op>" (exit 96).
+#
+# Call log ($MOCK_LOG), one line per call, TAB separated:
+#     <service> TAB <op> TAB <arg1> TAB <arg2> ...
+# The arguments are the ones left after the global options are stripped and
+# they are recorded verbatim except that, so the log stays line oriented,
+# every backslash is written as "\\", every newline as "\n", every tab as
+# "\t" and every carriage return as "\r".  A field therefore never contains
+# a raw tab/newline and `printf '%b'` restores the original text.  JSON
+# arguments (jq -c or pretty printed) survive this round trip unchanged.
+# tests/helpers/assert.bash understands this format (aws_call_arg etc.).
+#
+# Global options accepted and stripped anywhere on the command line:
+#   --output X  --no-cli-pager  --cli-connect-timeout N  --cli-read-timeout N
+#   --region R  --profile P  --endpoint-url X  (and a few harmless others)
+#
+# State lives under $MOCK_STATE_DIR:
+#   instances/<name>.json  static-ips/<name>.json  key-pairs/<name>.json
+#   operations/<id>.json   snapshots/<name>.json   counters/<name>   keys/
+# Objects use the real Lightsail field names; mock-internal bookkeeping is
+# stored in fields whose name starts with "_" and is never printed.
+#
+# See tests/mocks/README.md for every MOCK_* knob.
+# shellcheck disable=SC2016  # jq filters are deliberately single-quoted: $x inside them are jq variables
+set -euo pipefail
+
+if [[ -z ${MOCK_STATE_DIR:-} ]]; then
+  echo "mock aws used outside tests" >&2
+  exit 97
+fi
+
+MOCK_LOG=${MOCK_LOG:-$MOCK_STATE_DIR/aws.log}
+REGION=${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-west-1}}
+PROFILE=""
+ACCOUNT="123456789012"
+
+# ---------------------------------------------------------------------------
+# global option stripping
+# ---------------------------------------------------------------------------
+declare -a REST=()
+QUERY_SEEN=false
+while (($#)); do
+  case $1 in
+    --query) QUERY_SEEN=true; shift; [[ $# -gt 0 ]] && shift ;;
+    --query=*) QUERY_SEEN=true; shift ;;
+    --region) REGION=${2:-$REGION}; shift 2 ;;
+    --region=*) REGION=${1#*=}; shift ;;
+    --profile) PROFILE=${2:-}; shift 2 ;;
+    --profile=*) PROFILE=${1#*=}; shift ;;
+    --output|--cli-connect-timeout|--cli-read-timeout|--endpoint-url|--cli-binary-format|--ca-bundle|--color)
+      shift; [[ $# -gt 0 ]] && shift ;;
+    --output=*|--cli-connect-timeout=*|--cli-read-timeout=*|--endpoint-url=*|--cli-binary-format=*|--ca-bundle=*|--color=*)
+      shift ;;
+    --no-cli-pager|--no-cli-auto-prompt|--no-verify-ssl|--no-sign-request|--no-paginate|--debug)
+      shift ;;
+    *) REST+=("$1"); shift ;;
+  esac
+done
+: "$PROFILE"
+
+if ((${#REST[@]} < 1)); then
+  echo "usage: aws [options] <command> <subcommand> [parameters]" >&2
+  exit 252
+fi
+SERVICE=${REST[0]}
+OP=${REST[1]:-}
+if ((${#REST[@]} > 2)); then
+  ARGS=("${REST[@]:2}")
+else
+  ARGS=()
+fi
+
+# ---------------------------------------------------------------------------
+# call log
+# ---------------------------------------------------------------------------
+enc() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  printf '%s' "$s"
+}
+log_call() {
+  local line a
+  line="${SERVICE}"$'\t'"${OP}"
+  for a in "${ARGS[@]+"${ARGS[@]}"}"; do
+    line+=$'\t'"$(enc "$a")"
+  done
+  mkdir -p "$(dirname "$MOCK_LOG")"
+  printf '%s\n' "$line" >> "$MOCK_LOG"
+}
+log_call
+
+if [[ $QUERY_SEEN == true ]]; then
+  echo "mock aws: --query is not allowed (parse JSON with jq instead)" >&2
+  exit 98
+fi
+case $SERVICE in
+  lightsail|sts) ;;
+  *) echo "mock aws: unsupported service '$SERVICE'" >&2; exit 99 ;;
+esac
+if [[ -z $OP ]]; then
+  echo "usage: aws $SERVICE <operation>" >&2
+  exit 252
+fi
+
+# CamelCase operation name for error messages (get-instance -> GetInstance).
+OP_CAMEL=""
+IFS=- read -r -a _parts <<< "$OP"
+for _p in "${_parts[@]}"; do OP_CAMEL+="${_p^}"; done
+unset _parts _p
+
+# ---------------------------------------------------------------------------
+# generic helpers
+# ---------------------------------------------------------------------------
+aws_error() { # <ExceptionName> <message> [exit-code]
+  printf 'An error occurred (%s) when calling the %s operation: %s\n' "$1" "$OP_CAMEL" "$2" >&2
+  exit "${3:-254}"
+}
+not_found() { # <ResourceType>
+  aws_error NotFoundException "The $1 does not exist"
+}
+invalid_input() { aws_error InvalidInputException "$1"; }
+
+now_iso() { jq -rn 'now | floor | todate'; }
+iso_in() { jq -rn --argjson d "$1" '(now | floor) + $d | todate'; }
+
+mkdir -p "$MOCK_STATE_DIR"/{instances,static-ips,key-pairs,operations,snapshots,counters,keys}
+
+counter_get() {
+  local f=$MOCK_STATE_DIR/counters/$1
+  if [[ -f $f ]]; then cat "$f"; else printf '0'; fi
+}
+counter_next() {
+  local f=$MOCK_STATE_DIR/counters/$1 n
+  n=$(counter_get "$1")
+  n=$((n + 1))
+  printf '%s' "$n" > "$f"
+  printf '%s\n' "$n"
+}
+
+state_path() { printf '%s/%s/%s.json' "$MOCK_STATE_DIR" "$1" "$2"; }
+state_exists() { [[ -f "$(state_path "$1" "$2")" ]]; }
+state_read() { cat "$(state_path "$1" "$2")"; }
+state_write() { # kind name json
+  local p
+  p=$(state_path "$1" "$2")
+  printf '%s\n' "$3" > "$p.tmp"
+  mv "$p.tmp" "$p"
+}
+state_update() { # kind name jq-filter [jq-args...]
+  local kind=$1 name=$2 filter=$3 cur new
+  shift 3
+  cur=$(state_read "$kind" "$name")
+  new=$(jq "$@" "$filter" <<< "$cur")
+  state_write "$kind" "$name" "$new"
+}
+state_delete() { rm -f "$(state_path "$1" "$2")"; }
+state_list() { # kind -> JSON array sorted by name
+  local d=$MOCK_STATE_DIR/$1
+  local -a files=()
+  local f
+  for f in "$d"/*.json; do
+    [[ -f $f ]] && files+=("$f")
+  done
+  if ((${#files[@]})); then
+    jq -s 'sort_by(.name)' "${files[@]}"
+  else
+    printf '[]\n'
+  fi
+}
+# Strip mock-internal fields (top level keys starting with "_").
+public() { jq 'with_entries(select(.key | startswith("_") | not))'; }
+public_list() { jq 'map(with_entries(select(.key | startswith("_") | not)))'; }
+
+emit() { jq . <<< "$1"; }
+
+# ---------------------------------------------------------------------------
+# parameter parsing (--param value, --param=value, boolean flags)
+# ---------------------------------------------------------------------------
+declare -A P=()
+BOOL_FLAGS=" --force --force-delete-add-ons --include-default-key-pair --include-availability-zones --include-relational-database-availability-zones --include-inactive --use-latest-restorable-auto-snapshot --dry-run "
+_i=0
+_n=${#ARGS[@]}
+while ((_i < _n)); do
+  _a=${ARGS[_i]}
+  if [[ $_a == --*=* ]]; then
+    _k=${_a%%=*}
+    P[${_k#--}]=${_a#*=}
+    _i=$((_i + 1))
+  elif [[ $_a == --* ]]; then
+    if [[ $BOOL_FLAGS == *" $_a "* ]]; then
+      P[${_a#--}]=true
+      _i=$((_i + 1))
+    elif ((_i + 1 < _n)); then
+      P[${_a#--}]=${ARGS[_i + 1]}
+      _i=$((_i + 2))
+    else
+      printf 'aws: error: argument %s: expected one argument\n' "$_a" >&2
+      exit 252
+    fi
+  else
+    printf 'usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]\nUnknown options: %s\n' "$_a" >&2
+    exit 252
+  fi
+done
+unset _i _n _a _k
+
+has() { [[ -n ${P[$1]+x} ]]; }
+param() { printf '%s' "${P[$1]:-}"; }
+require() { # names...
+  local n missing=()
+  for n in "$@"; do has "$n" || missing+=("--$n")
+  done
+  if ((${#missing[@]})); then
+    printf 'aws: error: the following arguments are required: %s\n' "${missing[*]}" >&2
+    exit 252
+  fi
+}
+json_param() { # name default -> validated JSON on stdout
+  local name=$1 def=$2 v
+  if has "$name"; then
+    v=$(param "$name")
+    if ! jq -e . <<< "$v" > /dev/null 2>&1; then
+      printf "\nError parsing parameter '--%s': Invalid JSON: %s\n" "$name" "$v" >&2
+      exit 252
+    fi
+    printf '%s' "$v"
+  else
+    printf '%s' "$def"
+  fi
+}
+json_list_param() { # name -> JSON array (a bare string becomes a one element array)
+  local v
+  v=$(json_param "$1" '[]')
+  jq -c 'if type == "array" then . elif type == "string" then [.] else error("expected an array") end' <<< "$v"
+}
+
+# ---------------------------------------------------------------------------
+# fault injection
+# ---------------------------------------------------------------------------
+fail_check() {
+  local text="An error occurred (UnrecognizedClientException) when calling the ${OP_CAMEL} operation: The security token included in the request is invalid."
+  if [[ -n ${MOCK_FAIL_ALL_AUTH:-} && ${MOCK_FAIL_ALL_AUTH} != 0 && ${MOCK_FAIL_ALL_AUTH} != false ]]; then
+    printf '%s\n' "$text" >&2
+    exit 254
+  fi
+  [[ -n ${MOCK_FAIL:-} ]] || return 0
+  local rest=$MOCK_FAIL entry key msg op count used code
+  while [[ -n $rest ]]; do
+    entry=${rest%%;;*}
+    if [[ $rest == *";;"* ]]; then rest=${rest#*;;}; else rest=""; fi
+    [[ -n $entry ]] || continue
+    if [[ $entry == *=* ]]; then key=${entry%%=*}; msg=${entry#*=}; else key=$entry; msg=""; fi
+    if [[ $key == *:* ]]; then op=${key%%:*}; count=${key#*:}; else op=$key; count=1; fi
+    [[ $op == "$OP" ]] || continue
+    used=$(counter_get "fail_${OP}")
+    if [[ $count == '*' ]] || ((used < count)); then
+      counter_next "fail_${OP}" > /dev/null
+      [[ -n $msg ]] || msg=$text
+      code=254
+      [[ $msg == *"Could not connect"* ]] && code=255
+      printf '%s\n' "$msg" >&2
+      exit "$code"
+    fi
+  done
+  return 0
+}
+fail_check
+
+# ---------------------------------------------------------------------------
+# keys (throwaway user key, host key, certificate) - generated once per state dir
+# ---------------------------------------------------------------------------
+KEYS=$MOCK_STATE_DIR/keys
+ensure_keys() {
+  if [[ ! -f $KEYS/id_ed25519 ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C octosail-mock-user -f "$KEYS/id_ed25519.new" > /dev/null
+    mv "$KEYS/id_ed25519.new.pub" "$KEYS/id_ed25519.pub"
+    mv "$KEYS/id_ed25519.new" "$KEYS/id_ed25519"
+  fi
+  if [[ ! -f $KEYS/host_key ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C octosail-mock-host -f "$KEYS/host_key.new" > /dev/null
+    mv "$KEYS/host_key.new.pub" "$KEYS/host_key.pub"
+    mv "$KEYS/host_key.new" "$KEYS/host_key"
+  fi
+  if [[ ! -f $KEYS/id_ed25519-cert.pub ]]; then
+    ssh-keygen -q -s "$KEYS/host_key" -I octosail-mock -n ubuntu "$KEYS/id_ed25519.pub" > /dev/null 2>&1 \
+      || printf 'ssh-ed25519-cert-v01@openssh.com AAAAmockcertificate octosail-mock\n' > "$KEYS/id_ed25519-cert.pub"
+  fi
+}
+default_key_pair_name() { printf 'LightsailDefaultKeyPair-%s' "$REGION"; }
+md5_fingerprint() { # <pubkey file> -> aa:bb:... (no MD5: prefix)
+  local fp
+  fp=$(ssh-keygen -l -E md5 -f "$1" | awk '{print $2}')
+  printf '%s' "${fp#MD5:}"
+}
+sha256_fingerprint() {
+  ssh-keygen -l -E sha256 -f "$1" | awk '{print $2}'
+}
+sha1_fingerprint() {
+  ssh-keygen -l -E sha1 -f "$1" | awk '{print $2}'
+}
+b64_file() { base64 < "$1" | tr -d '\n'; }
+
+# ---------------------------------------------------------------------------
+# operations
+# ---------------------------------------------------------------------------
+op_new() { # <operationType> <resourceName> <resourceType> [az] -> public operation JSON (also stored)
+  local n id az json now
+  n=$(counter_next operation)
+  id=$(printf '00000000-0000-4000-8000-%012d' "$n")
+  az=${4:-${REGION}a}
+  now=$(now_iso)
+  json=$(jq -nc --arg id "$id" --arg rn "$2" --arg rt "$3" --arg ot "$1" --arg now "$now" --arg az "$az" --arg region "$REGION" '{
+    id: $id, resourceName: $rn, resourceType: $rt, createdAt: $now,
+    location: {availabilityZone: $az, regionName: $region},
+    isTerminal: false, operationDetails: "", operationType: $ot, status: "Started",
+    statusChangedAt: $now, _reads: 0 }')
+  state_write operations "$id" "$json"
+  public <<< "$json"
+}
+emit_ops() { # op-json... -> {operations:[...]}
+  printf '%s\n' "$@" | jq -s '{operations: .}'
+}
+emit_op() { jq '{operation: .}' <<< "$1"; }
+
+# ---------------------------------------------------------------------------
+# instances
+# ---------------------------------------------------------------------------
+instance_require() { state_exists instances "$1" || not_found Instance; }
+
+# Apply the poll-driven state machine for a read of the instance.  Returns 1
+# when the instance just finished shutting down (state file removed).
+instance_touch() {
+  local name=$1 json st polls new code
+  json=$(state_read instances "$name")
+  st=$(jq -r '.state.name' <<< "$json")
+  case $st in
+    pending|stopping|shutting-down|rebooting) ;;
+    *) return 0 ;;
+  esac
+  polls=$(jq -r '(._pending_polls // 0) - 1' <<< "$json")
+  if ((polls > 0)); then
+    state_update instances "$name" '._pending_polls = $p' --argjson p "$polls"
+    return 0
+  fi
+  case $st in
+    pending|rebooting) new=running; code=16 ;;
+    stopping) new=stopped; code=80 ;;
+    shutting-down) state_delete instances "$name"; return 1 ;;
+  esac
+  state_update instances "$name" '._pending_polls = 0 | .state = {code: $c, name: $n}' --argjson c "$code" --arg n "$new"
+  return 0
+}
+instance_set_transition() { # name newstate code
+  state_update instances "$1" '.state = {code: $c, name: $n} | ._pending_polls = $p' \
+    --argjson c "$3" --arg n "$2" --argjson p "${MOCK_PENDING_POLLS:-2}"
+}
+blueprint_name() {
+  case $1 in
+    ubuntu_*) printf 'Ubuntu' ;;
+    debian_*) printf 'Debian' ;;
+    amazon_linux_2023) printf 'Amazon Linux 2023' ;;
+    amazon_linux_2) printf 'Amazon Linux 2' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+instance_create() { # name az blueprint bundle userdata keypair tagsjson iptype snapshot-name
+  local name=$1 az=$2 bp=$3 bundle=$4 ud=$5 kp=$6 tags=$7 iptype=$8 snap=$9
+  local n ip pip now uuid
+  n=$(counter_next instance_ip)
+  ip="203.0.113.$n"
+  pip="172.26.0.$n"
+  now=$(now_iso)
+  uuid=$(printf '00000000-0000-4000-9000-%012d' "$n")
+  [[ -n $kp ]] || kp=$(default_key_pair_name)
+  [[ -n $iptype ]] || iptype=dualstack
+  jq -nc --arg name "$name" --arg az "$az" --arg region "$REGION" --arg bp "$bp" --arg bpn "$(blueprint_name "$bp")" \
+    --arg bundle "$bundle" --arg ud "$ud" --arg kp "$kp" --argjson tags "$tags" --arg iptype "$iptype" \
+    --arg ip "$ip" --arg pip "$pip" --arg now "$now" --arg uuid "$uuid" --arg account "$ACCOUNT" \
+    --arg snap "$snap" --argjson polls "${MOCK_PENDING_POLLS:-2}" '
+    def port($from; $to): {fromPort: $from, toPort: $to, protocol: "tcp",
+      accessFrom: "Anywhere (0.0.0.0/0 and ::/0)", accessType: "public", commonName: "",
+      accessDirection: "inbound", cidrs: ["0.0.0.0/0"], ipv6Cidrs: ["::/0"], cidrListAliases: []};
+    {
+      name: $name,
+      arn: ("arn:aws:lightsail:" + $region + ":" + $account + ":Instance/" + $uuid),
+      supportCode: ($account + "/i-" + $uuid[24:]),
+      createdAt: $now,
+      location: {availabilityZone: $az, regionName: $region},
+      resourceType: "Instance",
+      tags: $tags,
+      blueprintId: $bp,
+      blueprintName: $bpn,
+      bundleId: $bundle,
+      addOns: [],
+      isStaticIp: false,
+      privateIpAddress: $pip,
+      publicIpAddress: $ip,
+      ipv6Addresses: [],
+      ipAddressType: $iptype,
+      hardware: {cpuCount: 2, disks: [{name: $name, path: "/dev/xvda", sizeInGb: 20, isSystemDisk: true, attachedTo: $name, isAttached: true, iops: 100, createdAt: $now}], ramSizeInGb: 0.5},
+      networking: {monthlyTransfer: {gbPerMonthAllocated: 1024}, ports: [port(22; 22), port(80; 80)]},
+      state: {code: 0, name: "pending"},
+      username: "ubuntu",
+      sshKeyName: $kp,
+      metadataOptions: {state: "applied", httpTokens: "optional", httpEndpoint: "enabled", httpPutResponseHopLimit: 1, httpProtocolIpv6: "disabled"},
+      _pending_polls: $polls,
+      _access_reads: 0,
+      _user_data: $ud,
+      _from_snapshot: $snap,
+      _ephemeral_ip: ""
+    }'
+}
+op_create_instances() { # <optype> <snapshot-name>
+  local optype=$1 snap=$2 names name az bp bundle tags ud kp iptype json
+  local -a ops=() list=()
+  require instance-names availability-zone
+  names=$(json_list_param instance-names)
+  az=$(param availability-zone)
+  tags=$(json_param tags '[]')
+  jq -e 'type == "array"' <<< "$tags" > /dev/null || invalid_input "tags must be a list"
+  ud=$(param user-data)
+  kp=$(param key-pair-name)
+  iptype=$(param ip-address-type)
+  if [[ -n $snap ]]; then
+    state_exists snapshots "$snap" || not_found InstanceSnapshot
+    bp=$(jq -r '.fromBlueprintId' "$(state_path snapshots "$snap")")
+    bundle=$(param bundle-id)
+    [[ -n $bundle ]] || bundle=$(jq -r '.fromBundleId' "$(state_path snapshots "$snap")")
+  else
+    require blueprint-id bundle-id
+    bp=$(param blueprint-id)
+    bundle=$(param bundle-id)
+  fi
+  while IFS= read -r name; do
+    [[ -n $name ]] || continue
+    list+=("$name")
+  done < <(jq -r '.[]' <<< "$names")
+  ((${#list[@]})) || invalid_input "instanceNames must not be empty"
+  for name in "${list[@]}"; do
+    state_exists instances "$name" && invalid_input "The specified instance name is already in use"
+  done
+  for name in "${list[@]}"; do
+    json=$(instance_create "$name" "$az" "$bp" "$bundle" "$ud" "$kp" "$tags" "$iptype" "$snap")
+    state_write instances "$name" "$json"
+    ops+=("$(op_new "$optype" "$name" Instance "$az")")
+  done
+  emit_ops "${ops[@]}"
+}
+op_get_instance() {
+  local name
+  require instance-name
+  name=$(param instance-name)
+  instance_require "$name"
+  instance_touch "$name" || not_found Instance
+  state_read instances "$name" | public | jq '{instance: .}'
+}
+op_get_instance_state() {
+  local name
+  require instance-name
+  name=$(param instance-name)
+  instance_require "$name"
+  instance_touch "$name" || not_found Instance
+  state_read instances "$name" | jq '{state: .state}'
+}
+op_get_instances() {
+  local token=0 all
+  has page-token && token=$(param page-token)
+  [[ $token =~ ^[0-9]+$ ]] || invalid_input "The page token is invalid"
+  all=$(state_list instances | public_list)
+  jq --argjson off "$token" '
+    {instances: .[$off:$off + 2]} + (if length > $off + 2 then {nextPageToken: (($off + 2) | tostring)} else {} end)' <<< "$all"
+}
+op_get_instance_access_details() {
+  local name proto json st reads polls hk_json ttl now_plus nva
+  require instance-name
+  name=$(param instance-name)
+  proto=$(param protocol)
+  [[ -z $proto || $proto == ssh || $proto == rdp ]] || invalid_input "protocol must be ssh or rdp"
+  instance_require "$name"
+  ensure_keys
+  json=$(state_read instances "$name")
+  st=$(jq -r '.state.name' <<< "$json")
+  hk_json='[]'
+  if [[ $st == running ]]; then
+    reads=$(jq -r '(._access_reads // 0) + 1' <<< "$json")
+    state_update instances "$name" '._access_reads = $r' --argjson r "$reads"
+    polls=${MOCK_HOSTKEY_POLLS:-1}
+    if ((reads >= polls)); then
+      if [[ ${MOCK_HOSTKEY_EXPIRED:-0} != 0 ]]; then
+        nva=$(iso_in -3600)
+      else
+        nva=$(iso_in 315360000)
+      fi
+      hk_json=$(jq -nc --arg pub "$(awk '{print $2}' "$KEYS/host_key.pub")" \
+        --arg fp256 "$(sha256_fingerprint "$KEYS/host_key.pub")" --arg fp1 "$(sha1_fingerprint "$KEYS/host_key.pub")" \
+        --arg wa "$(now_iso)" --arg nvb "$(iso_in -60)" --arg nva "$nva" \
+        '[{algorithm: "ssh-ed25519", publicKey: $pub, witnessedAt: $wa, fingerprintSHA1: $fp1, fingerprintSHA256: $fp256, notValidBefore: $nvb, notValidAfter: $nva}]')
+    fi
+  fi
+  ttl=${MOCK_ACCESS_TTL:-600}
+  now_plus=$(iso_in "$ttl")
+  jq -n --arg cert "$(cat "$KEYS/id_ed25519-cert.pub")" --arg exp "$now_plus" \
+    --arg ip "$(jq -r '.publicIpAddress' <<< "$json")" --arg user "$(jq -r '.username' <<< "$json")" \
+    --arg pk "$(cat "$KEYS/id_ed25519")" --arg name "$name" --argjson hk "$hk_json" \
+    --arg nokey "${MOCK_NO_PRIVATE_KEY:-0}" '
+    {accessDetails: (
+      {certKey: $cert, expiresAt: $exp, ipAddress: $ip, ipv6Addresses: [], privateKey: ($pk + "\n"),
+       protocol: "ssh", instanceName: $name, username: $user, hostKeys: $hk}
+      | if $nokey != "0" and $nokey != "" and $nokey != "false" then del(.privateKey, .certKey) else . end)}'
+}
+port_info_filter='
+  def access_from: if (.cidrs == ["0.0.0.0/0"] and .ipv6Cidrs == ["::/0"]) then "Anywhere (0.0.0.0/0 and ::/0)"
+    elif .cidrs == ["0.0.0.0/0"] then "Anywhere (0.0.0.0/0)"
+    elif .ipv6Cidrs == ["::/0"] then "Anywhere (::/0)" else "Custom" end;
+  def to_port_info:
+    (if (.cidrs // []) == [] and (.ipv6Cidrs // []) == [] and (.cidrListAliases // []) == []
+       then . + {cidrs: ["0.0.0.0/0"], ipv6Cidrs: ["::/0"]} else . end)
+    | {fromPort: (.fromPort // 0), toPort: (.toPort // .fromPort // 0), protocol: (.protocol // "tcp"),
+       cidrs: (.cidrs // []), ipv6Cidrs: (.ipv6Cidrs // []), cidrListAliases: (.cidrListAliases // [])}
+    | . + {accessFrom: access_from, accessType: "public", commonName: "", accessDirection: "inbound"};
+  def same($p): .fromPort == $p.fromPort and .toPort == $p.toPort and .protocol == $p.protocol;
+'
+op_open_ports() {
+  local name pi
+  require instance-name port-info
+  name=$(param instance-name)
+  pi=$(json_param port-info '{}')
+  instance_require "$name"
+  state_update instances "$name" "$port_info_filter"'
+    ($pi | to_port_info) as $p | .networking.ports = ((.networking.ports | map(select(same($p) | not))) + [$p])' --argjson pi "$pi"
+  emit_op "$(op_new OpenInstancePublicPorts "$name" Instance)"
+}
+op_close_ports() {
+  local name pi
+  require instance-name port-info
+  name=$(param instance-name)
+  pi=$(json_param port-info '{}')
+  instance_require "$name"
+  state_update instances "$name" "$port_info_filter"'
+    ($pi | to_port_info) as $p | .networking.ports = (.networking.ports | map(select(same($p) | not)))' --argjson pi "$pi"
+  emit_op "$(op_new CloseInstancePublicPorts "$name" Instance)"
+}
+op_put_ports() {
+  local name pis
+  require instance-name port-infos
+  name=$(param instance-name)
+  pis=$(json_param port-infos '[]')
+  jq -e 'type == "array"' <<< "$pis" > /dev/null || invalid_input "portInfos must be a list"
+  instance_require "$name"
+  state_update instances "$name" "$port_info_filter"'
+    .networking.ports = ($pis | map(to_port_info))' --argjson pis "$pis"
+  emit_op "$(op_new PutInstancePublicPorts "$name" Instance)"
+}
+op_get_instance_port_states() {
+  local name
+  require instance-name
+  name=$(param instance-name)
+  instance_require "$name"
+  state_read instances "$name" | jq '{portStates: [.networking.ports[] | {fromPort, toPort, protocol, state: "open", cidrs, ipv6Cidrs, cidrListAliases}]}'
+}
+op_start_instance() {
+  local name st
+  require instance-name
+  name=$(param instance-name)
+  instance_require "$name"
+  st=$(jq -r '.state.name' "$(state_path instances "$name")")
+  case $st in
+    stopped|stopping) instance_set_transition "$name" pending 0 ;;
+    *) ;;
+  esac
+  emit_ops "$(op_new StartInstance "$name" Instance)"
+}
+op_stop_instance() {
+  local name st
+  require instance-name
+  name=$(param instance-name)
+  instance_require "$name"
+  st=$(jq -r '.state.name' "$(state_path instances "$name")")
+  case $st in
+    running|pending|rebooting) instance_set_transition "$name" stopping 64 ;;
+    *) ;;
+  esac
+  emit_ops "$(op_new StopInstance "$name" Instance)"
+}
+op_reboot_instance() {
+  local name st
+  require instance-name
+  name=$(param instance-name)
+  instance_require "$name"
+  st=$(jq -r '.state.name' "$(state_path instances "$name")")
+  [[ $st == running || $st == rebooting ]] || invalid_input "The instance must be running to be rebooted (current state: $st)"
+  instance_set_transition "$name" rebooting 16
+  emit_ops "$(op_new RebootInstance "$name" Instance)"
+}
+static_ip_detach_from() { # instance-name (best effort, when the instance goes away)
+  local sip
+  sip=$(jq -r '._static_ip // ""' "$(state_path instances "$1")")
+  if [[ -n $sip ]] && state_exists static-ips "$sip"; then
+    state_update static-ips "$sip" 'del(.attachedTo) | .isAttached = false'
+  fi
+}
+op_delete_instance() {
+  local name
+  require instance-name
+  name=$(param instance-name)
+  instance_require "$name"
+  static_ip_detach_from "$name"
+  state_update instances "$name" '.isStaticIp = false | ._static_ip = ""'
+  instance_set_transition "$name" shutting-down 32
+  emit_ops "$(op_new DeleteInstance "$name" Instance)"
+}
+
+# ---------------------------------------------------------------------------
+# operations read back
+# ---------------------------------------------------------------------------
+op_get_operation() {
+  local id json reads polls status
+  require operation-id
+  id=$(param operation-id)
+  state_exists operations "$id" || not_found Operation
+  json=$(state_read operations "$id")
+  reads=$(jq -r '(._reads // 0) + 1' <<< "$json")
+  polls=${MOCK_OP_POLLS:-1}
+  if jq -e '.isTerminal' <<< "$json" > /dev/null; then
+    state_update operations "$id" '._reads = $r' --argjson r "$reads"
+  elif ((reads >= polls)); then
+    status=${MOCK_OP_STATUS:-Completed}
+    state_update operations "$id" '
+      ._reads = $r | .status = $s | .isTerminal = true | .statusChangedAt = $now
+      | if $s == "Failed" then .errorCode = "TestFailure" | .errorDetails = "injected failure" else . end' \
+      --argjson r "$reads" --arg s "$status" --arg now "$(now_iso)"
+  else
+    state_update operations "$id" '._reads = $r' --argjson r "$reads"
+  fi
+  state_read operations "$id" | public | jq '{operation: .}'
+}
+op_get_operations() {
+  state_list operations | public_list | jq 'sort_by(.createdAt, .id) | {operations: .}'
+}
+op_get_operations_for_resource() {
+  local name
+  require resource-name
+  name=$(param resource-name)
+  state_list operations | public_list | jq --arg n "$name" '{operations: (map(select(.resourceName == $n)) | sort_by(.createdAt, .id))}'
+}
+
+# ---------------------------------------------------------------------------
+# tags
+# ---------------------------------------------------------------------------
+find_resource_kind() { # name -> prints kind
+  local k
+  for k in instances snapshots static-ips key-pairs; do
+    if state_exists "$k" "$1"; then printf '%s' "$k"; return 0; fi
+  done
+  return 1
+}
+resource_type_of_kind() {
+  case $1 in
+    instances) printf 'Instance' ;;
+    snapshots) printf 'InstanceSnapshot' ;;
+    static-ips) printf 'StaticIp' ;;
+    key-pairs) printf 'KeyPair' ;;
+  esac
+}
+op_tag_resource() {
+  local name tags kind
+  require resource-name tags
+  name=$(param resource-name)
+  tags=$(json_param tags '[]')
+  jq -e 'type == "array" and all(.[]; type == "object" and has("key"))' <<< "$tags" > /dev/null || invalid_input "tags must be a list of {key,value}"
+  kind=$(find_resource_kind "$name") || not_found Resource
+  state_update "$kind" "$name" '
+    .tags = ((.tags // []) | map(select(.key as $k | ($new | map(.key) | index($k)) == null))) + $new' --argjson new "$tags"
+  emit_ops "$(op_new TagResource "$name" "$(resource_type_of_kind "$kind")")"
+}
+op_untag_resource() {
+  local name keys kind
+  require resource-name tag-keys
+  name=$(param resource-name)
+  keys=$(json_list_param tag-keys)
+  kind=$(find_resource_kind "$name") || not_found Resource
+  state_update "$kind" "$name" '.tags = ((.tags // []) | map(select(.key as $k | ($keys | index($k)) == null)))' --argjson keys "$keys"
+  emit_ops "$(op_new UntagResource "$name" "$(resource_type_of_kind "$kind")")"
+}
+
+# ---------------------------------------------------------------------------
+# key pairs
+# ---------------------------------------------------------------------------
+key_pair_json() { # name fingerprint pubkey-b64 tagsjson
+  local n
+  n=$(counter_next key_pair)
+  jq -nc --arg name "$1" --arg fp "$2" --arg pub "$3" --argjson tags "$4" --arg region "$REGION" \
+    --arg account "$ACCOUNT" --arg now "$(now_iso)" --arg uuid "$(printf '00000000-0000-4000-a000-%012d' "$n")" '{
+      name: $name,
+      arn: ("arn:aws:lightsail:" + $region + ":" + $account + ":KeyPair/" + $uuid),
+      supportCode: ($account + "/" + $uuid),
+      createdAt: $now,
+      location: {availabilityZone: "all", regionName: $region},
+      resourceType: "KeyPair",
+      tags: $tags,
+      fingerprint: $fp,
+      _public_key_base64: $pub }'
+}
+op_create_key_pair() {
+  local name tags tmp fp json
+  require key-pair-name
+  name=$(param key-pair-name)
+  tags=$(json_param tags '[]')
+  state_exists key-pairs "$name" && invalid_input "The specified key pair name is already in use"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/octosail-mock-kp.XXXXXX")
+  ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$tmp/key" > /dev/null
+  fp=$(md5_fingerprint "$tmp/key.pub")
+  json=$(key_pair_json "$name" "$fp" "$(b64_file "$tmp/key.pub")" "$tags")
+  state_write key-pairs "$name" "$json"
+  jq -n --argjson kp "$(public <<< "$json")" --arg pub "$(b64_file "$tmp/key.pub")" --arg priv "$(b64_file "$tmp/key")" \
+    --argjson op "$(op_new CreateKeyPair "$name" KeyPair all)" \
+    '{keyPair: $kp, publicKeyBase64: $pub, privateKeyBase64: $priv, operation: $op}'
+  rm -rf "$tmp"
+}
+op_import_key_pair() {
+  local name b64 tmp fp json
+  require key-pair-name public-key-base64
+  name=$(param key-pair-name)
+  b64=$(param public-key-base64)
+  state_exists key-pairs "$name" && invalid_input "The specified key pair name is already in use"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/octosail-mock-kp.XXXXXX")
+  if ! printf '%s' "$b64" | base64 --decode > "$tmp/key.pub" 2> /dev/null || ! [[ -s $tmp/key.pub ]]; then
+    rm -rf "$tmp"
+    invalid_input "The public key is not valid base64"
+  fi
+  if ! fp=$(md5_fingerprint "$tmp/key.pub" 2> /dev/null) || [[ -z $fp ]]; then
+    rm -rf "$tmp"
+    invalid_input "The public key is not a valid OpenSSH public key"
+  fi
+  json=$(key_pair_json "$name" "$fp" "$b64" '[]')
+  state_write key-pairs "$name" "$json"
+  rm -rf "$tmp"
+  emit_op "$(op_new ImportKeyPair "$name" KeyPair all)"
+}
+op_get_key_pair() {
+  local name
+  require key-pair-name
+  name=$(param key-pair-name)
+  state_exists key-pairs "$name" || not_found KeyPair
+  state_read key-pairs "$name" | public | jq '{keyPair: .}'
+}
+default_key_pair_json() {
+  ensure_keys
+  jq -nc --arg name "$(default_key_pair_name)" --arg fp "$(md5_fingerprint "$KEYS/id_ed25519.pub")" \
+    --arg region "$REGION" --arg account "$ACCOUNT" --arg now "$(now_iso)" '{
+      name: $name,
+      arn: ("arn:aws:lightsail:" + $region + ":" + $account + ":KeyPair/00000000-0000-4000-a000-000000000000"),
+      supportCode: ($account + "/default"),
+      createdAt: $now,
+      location: {availabilityZone: "all", regionName: $region},
+      resourceType: "KeyPair",
+      tags: [],
+      fingerprint: $fp }'
+}
+op_get_key_pairs() {
+  local list
+  list=$(state_list key-pairs | public_list)
+  if has include-default-key-pair; then
+    jq --argjson d "$(default_key_pair_json)" '{keyPairs: ([$d] + .)}' <<< "$list"
+  else
+    jq '{keyPairs: .}' <<< "$list"
+  fi
+}
+op_delete_key_pair() {
+  local name
+  require key-pair-name
+  name=$(param key-pair-name)
+  state_exists key-pairs "$name" || not_found KeyPair
+  state_delete key-pairs "$name"
+  emit_op "$(op_new DeleteKeyPair "$name" KeyPair all)"
+}
+op_download_default_key_pair() {
+  ensure_keys
+  jq -n --arg pub "$(b64_file "$KEYS/id_ed25519.pub")" --arg priv "$(b64_file "$KEYS/id_ed25519")" --arg now "$(now_iso)" \
+    '{publicKeyBase64: $pub, privateKeyBase64: $priv, createdAt: $now}'
+}
+
+# ---------------------------------------------------------------------------
+# static IPs
+# ---------------------------------------------------------------------------
+op_allocate_static_ip() {
+  local name n json
+  require static-ip-name
+  name=$(param static-ip-name)
+  state_exists static-ips "$name" && invalid_input "The specified static IP name is already in use"
+  n=$(counter_next static_ip)
+  json=$(jq -nc --arg name "$name" --arg ip "198.51.100.$n" --arg region "$REGION" --arg account "$ACCOUNT" \
+    --arg now "$(now_iso)" --arg uuid "$(printf '00000000-0000-4000-b000-%012d' "$n")" '{
+      name: $name,
+      arn: ("arn:aws:lightsail:" + $region + ":" + $account + ":StaticIp/" + $uuid),
+      supportCode: ($account + "/" + $ip),
+      createdAt: $now,
+      location: {availabilityZone: "all", regionName: $region},
+      resourceType: "StaticIp",
+      ipAddress: $ip,
+      isAttached: false,
+      tags: [] }')
+  state_write static-ips "$name" "$json"
+  emit_ops "$(op_new AllocateStaticIp "$name" StaticIp all)"
+}
+op_attach_static_ip() {
+  local sname iname sjson ijson attached_to cur_sip ip
+  require static-ip-name instance-name
+  sname=$(param static-ip-name)
+  iname=$(param instance-name)
+  state_exists static-ips "$sname" || not_found StaticIp
+  instance_require "$iname"
+  sjson=$(state_read static-ips "$sname")
+  ijson=$(state_read instances "$iname")
+  attached_to=$(jq -r '.attachedTo // ""' <<< "$sjson")
+  cur_sip=$(jq -r '._static_ip // ""' <<< "$ijson")
+  if [[ -n $attached_to && $attached_to != "$iname" ]]; then
+    invalid_input "The static IP $sname is already attached to instance $attached_to"
+  fi
+  if [[ -n $cur_sip && $cur_sip != "$sname" ]]; then
+    invalid_input "The instance $iname already has static IP $cur_sip attached"
+  fi
+  if [[ $attached_to != "$iname" ]]; then
+    ip=$(jq -r '.ipAddress' <<< "$sjson")
+    state_update static-ips "$sname" '.attachedTo = $i | .isAttached = true' --arg i "$iname"
+    state_update instances "$iname" '._ephemeral_ip = .publicIpAddress | .publicIpAddress = $ip | .isStaticIp = true | ._static_ip = $s' \
+      --arg ip "$ip" --arg s "$sname"
+  fi
+  emit_ops "$(op_new AttachStaticIp "$sname" StaticIp all)"
+}
+static_ip_detach() { # static-ip-name
+  local sname=$1 attached_to eph n
+  attached_to=$(jq -r '.attachedTo // ""' "$(state_path static-ips "$sname")")
+  state_update static-ips "$sname" 'del(.attachedTo) | .isAttached = false'
+  if [[ -n $attached_to ]] && state_exists instances "$attached_to"; then
+    eph=$(jq -r '._ephemeral_ip // ""' "$(state_path instances "$attached_to")")
+    if [[ -z $eph ]]; then
+      n=$(counter_next instance_ip)
+      eph="203.0.113.$n"
+    fi
+    state_update instances "$attached_to" '.publicIpAddress = $ip | .isStaticIp = false | ._static_ip = "" | ._ephemeral_ip = ""' --arg ip "$eph"
+  fi
+}
+op_detach_static_ip() {
+  local sname
+  require static-ip-name
+  sname=$(param static-ip-name)
+  state_exists static-ips "$sname" || not_found StaticIp
+  static_ip_detach "$sname"
+  emit_ops "$(op_new DetachStaticIp "$sname" StaticIp all)"
+}
+op_release_static_ip() {
+  local sname
+  require static-ip-name
+  sname=$(param static-ip-name)
+  state_exists static-ips "$sname" || not_found StaticIp
+  static_ip_detach "$sname"
+  state_delete static-ips "$sname"
+  emit_ops "$(op_new ReleaseStaticIp "$sname" StaticIp all)"
+}
+op_get_static_ip() {
+  local sname
+  require static-ip-name
+  sname=$(param static-ip-name)
+  state_exists static-ips "$sname" || not_found StaticIp
+  state_read static-ips "$sname" | public | jq '{staticIp: .}'
+}
+op_get_static_ips() {
+  state_list static-ips | public_list | jq '{staticIps: .}'
+}
+
+# ---------------------------------------------------------------------------
+# snapshots
+# ---------------------------------------------------------------------------
+op_create_instance_snapshot() {
+  local sname iname tags ijson json n
+  require instance-snapshot-name instance-name
+  sname=$(param instance-snapshot-name)
+  iname=$(param instance-name)
+  tags=$(json_param tags '[]')
+  state_exists snapshots "$sname" && invalid_input "The specified snapshot name is already in use"
+  instance_require "$iname"
+  ijson=$(state_read instances "$iname")
+  n=$(counter_next snapshot)
+  json=$(jq -nc --arg name "$sname" --argjson inst "$ijson" --argjson tags "$tags" --arg region "$REGION" \
+    --arg account "$ACCOUNT" --arg now "$(now_iso)" --arg uuid "$(printf '00000000-0000-4000-c000-%012d' "$n")" '{
+      name: $name,
+      arn: ("arn:aws:lightsail:" + $region + ":" + $account + ":InstanceSnapshot/" + $uuid),
+      supportCode: ($account + "/" + $uuid),
+      createdAt: $now,
+      location: $inst.location,
+      resourceType: "InstanceSnapshot",
+      tags: $tags,
+      state: "pending",
+      progress: "0%",
+      fromAttachedDisks: [],
+      fromInstanceName: $inst.name,
+      fromInstanceArn: $inst.arn,
+      fromBlueprintId: $inst.blueprintId,
+      fromBundleId: $inst.bundleId,
+      isFromAutoSnapshot: false,
+      sizeInGb: 20,
+      _reads: 0 }')
+  state_write snapshots "$sname" "$json"
+  emit_ops "$(op_new CreateInstanceSnapshot "$sname" InstanceSnapshot)" "$(op_new CreateInstanceSnapshot "$iname" Instance)"
+}
+op_get_instance_snapshot() {
+  local sname reads polls st
+  require instance-snapshot-name
+  sname=$(param instance-snapshot-name)
+  state_exists snapshots "$sname" || not_found InstanceSnapshot
+  reads=$(jq -r '(._reads // 0) + 1' "$(state_path snapshots "$sname")")
+  polls=${MOCK_SNAPSHOT_POLLS:-1}
+  st=$(jq -r '.state' "$(state_path snapshots "$sname")")
+  if [[ $st == pending ]] && ((reads >= polls)); then
+    if [[ ${MOCK_SNAPSHOT_STATUS:-available} == error ]]; then
+      state_update snapshots "$sname" '._reads = $r | .state = "error" | .progress = "0%"' --argjson r "$reads"
+    else
+      state_update snapshots "$sname" '._reads = $r | .state = "available" | .progress = "100%"' --argjson r "$reads"
+    fi
+  else
+    state_update snapshots "$sname" '._reads = $r' --argjson r "$reads"
+  fi
+  state_read snapshots "$sname" | public | jq '{instanceSnapshot: .}'
+}
+op_get_instance_snapshots() {
+  state_list snapshots | public_list | jq '{instanceSnapshots: .}'
+}
+op_delete_instance_snapshot() {
+  local sname
+  require instance-snapshot-name
+  sname=$(param instance-snapshot-name)
+  state_exists snapshots "$sname" || not_found InstanceSnapshot
+  state_delete snapshots "$sname"
+  emit_ops "$(op_new DeleteInstanceSnapshot "$sname" InstanceSnapshot)"
+}
+
+# ---------------------------------------------------------------------------
+# static catalogues
+# ---------------------------------------------------------------------------
+op_get_regions() {
+  local with_az=false
+  has include-availability-zones && with_az=true
+  jq -n --argjson az "$with_az" '
+    def region($name; $disp; $cc; $desc): {continentCode: $cc, description: $desc, displayName: $disp, name: $name}
+      + (if $az then {availabilityZones: [ {zoneName: ($name + "a"), state: "available"}, {zoneName: ($name + "b"), state: "available"} ],
+                      relationalDatabaseAvailabilityZones: []} else {} end);
+    {regions: [
+      region("us-east-1"; "Virginia"; "NA"; "This region is recommended to serve users in the eastern United States"),
+      region("us-west-2"; "Oregon"; "NA"; "This region is recommended to serve users in the western United States"),
+      region("eu-west-1"; "Ireland"; "EU"; "This region is recommended to serve users in Ireland, the United Kingdom, and Iceland"),
+      region("eu-central-1"; "Frankfurt"; "EU"; "This region is recommended to serve users in Germany, Austria, Switzerland and eastern Europe"),
+      region("ap-southeast-1"; "Singapore"; "AS"; "This region is recommended to serve users in Singapore and southeast Asia")
+    ]}'
+}
+op_get_blueprints() {
+  jq -n '{blueprints: [
+    {blueprintId: "ubuntu_24_04", name: "Ubuntu", group: "ubuntu_24", type: "os", description: "Ubuntu 24.04 LTS", isActive: true, minPower: 0, version: "24.04 LTS", versionCode: "1", productUrl: "https://aws.amazon.com/marketplace/pp/B0CM2GZK9Y", licenseUrl: "https://ubuntu.com/legal", platform: "LINUX_UNIX", appCategory: null},
+    {blueprintId: "ubuntu_22_04", name: "Ubuntu", group: "ubuntu_22", type: "os", description: "Ubuntu 22.04 LTS", isActive: true, minPower: 0, version: "22.04 LTS", versionCode: "1", productUrl: "https://aws.amazon.com/marketplace/pp/B09ZYBG4XP", licenseUrl: "https://ubuntu.com/legal", platform: "LINUX_UNIX", appCategory: null},
+    {blueprintId: "debian_12", name: "Debian", group: "debian_12", type: "os", description: "Debian 12", isActive: true, minPower: 0, version: "12", versionCode: "1", productUrl: "https://aws.amazon.com/marketplace/pp/B0BWCYK7HH", licenseUrl: "https://www.debian.org/legal/licenses/", platform: "LINUX_UNIX", appCategory: null},
+    {blueprintId: "amazon_linux_2023", name: "Amazon Linux 2023", group: "amazon_linux_2023", type: "os", description: "Amazon Linux 2023", isActive: true, minPower: 0, version: "2023", versionCode: "1", productUrl: "https://aws.amazon.com/linux/amazon-linux-2023/", licenseUrl: "https://aws.amazon.com/agreement/", platform: "LINUX_UNIX", appCategory: null}
+  ]}'
+}
+op_get_bundles() {
+  jq -n '{bundles: [
+    {price: 5.0, cpuCount: 2, diskSizeInGb: 20, bundleId: "nano_3_0", instanceType: "nano", isActive: true, name: "Nano", power: 300, ramSizeInGb: 0.5, transferPerMonthInGb: 1024, supportedPlatforms: ["LINUX_UNIX"], supportedAppCategories: [], publicIpv4AddressCount: 1},
+    {price: 7.0, cpuCount: 2, diskSizeInGb: 40, bundleId: "micro_3_0", instanceType: "micro", isActive: true, name: "Micro", power: 500, ramSizeInGb: 1.0, transferPerMonthInGb: 2048, supportedPlatforms: ["LINUX_UNIX"], supportedAppCategories: [], publicIpv4AddressCount: 1},
+    {price: 12.0, cpuCount: 2, diskSizeInGb: 60, bundleId: "small_3_0", instanceType: "small", isActive: true, name: "Small", power: 1000, ramSizeInGb: 2.0, transferPerMonthInGb: 3072, supportedPlatforms: ["LINUX_UNIX"], supportedAppCategories: [], publicIpv4AddressCount: 1},
+    {price: 24.0, cpuCount: 2, diskSizeInGb: 80, bundleId: "medium_3_0", instanceType: "medium", isActive: true, name: "Medium", power: 2000, ramSizeInGb: 4.0, transferPerMonthInGb: 4096, supportedPlatforms: ["LINUX_UNIX"], supportedAppCategories: [], publicIpv4AddressCount: 1}
+  ]}'
+}
+
+# ---------------------------------------------------------------------------
+# sts
+# ---------------------------------------------------------------------------
+op_get_caller_identity() {
+  jq -n --arg a "$ACCOUNT" '{UserId: "AIDAMOCKUSER0000000000", Account: $a, Arn: ("arn:aws:iam::" + $a + ":user/octosail-test")}'
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+if [[ $SERVICE == sts ]]; then
+  case $OP in
+    get-caller-identity) op_get_caller_identity ;;
+    *) echo "Unknown mock operation $OP" >&2; exit 96 ;;
+  esac
+  exit 0
+fi
+
+case $OP in
+  create-instances) op_create_instances CreateInstance "" ;;
+  create-instances-from-snapshot) require instance-snapshot-name; op_create_instances CreateInstancesFromSnapshot "$(param instance-snapshot-name)" ;;
+  get-instance) op_get_instance ;;
+  get-instances) op_get_instances ;;
+  get-instance-state) op_get_instance_state ;;
+  get-instance-access-details) op_get_instance_access_details ;;
+  get-instance-port-states) op_get_instance_port_states ;;
+  open-instance-public-ports) op_open_ports ;;
+  close-instance-public-ports) op_close_ports ;;
+  put-instance-public-ports) op_put_ports ;;
+  start-instance) op_start_instance ;;
+  stop-instance) op_stop_instance ;;
+  reboot-instance) op_reboot_instance ;;
+  delete-instance) op_delete_instance ;;
+  get-operation) op_get_operation ;;
+  get-operations) op_get_operations ;;
+  get-operations-for-resource) op_get_operations_for_resource ;;
+  tag-resource) op_tag_resource ;;
+  untag-resource) op_untag_resource ;;
+  create-key-pair) op_create_key_pair ;;
+  import-key-pair) op_import_key_pair ;;
+  get-key-pair) op_get_key_pair ;;
+  get-key-pairs) op_get_key_pairs ;;
+  delete-key-pair) op_delete_key_pair ;;
+  download-default-key-pair) op_download_default_key_pair ;;
+  allocate-static-ip) op_allocate_static_ip ;;
+  attach-static-ip) op_attach_static_ip ;;
+  detach-static-ip) op_detach_static_ip ;;
+  release-static-ip) op_release_static_ip ;;
+  get-static-ip) op_get_static_ip ;;
+  get-static-ips) op_get_static_ips ;;
+  create-instance-snapshot) op_create_instance_snapshot ;;
+  get-instance-snapshot) op_get_instance_snapshot ;;
+  get-instance-snapshots) op_get_instance_snapshots ;;
+  delete-instance-snapshot) op_delete_instance_snapshot ;;
+  get-regions) op_get_regions ;;
+  get-blueprints) op_get_blueprints ;;
+  get-bundles) op_get_bundles ;;
+  *) echo "Unknown mock operation $OP" >&2; exit 96 ;;
+esac

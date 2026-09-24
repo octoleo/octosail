@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Fake remote cloud-init, driven by CLOUD_INIT_MOCK_STATUS (default "done"):
+#   done              status --wait exits 0;  status prints "status: done"
+#   error             status --wait exits 1;  status prints "status: error"
+#   degraded          status --wait exits 2;  status prints "status: degraded"
+#   running-then-done status --wait exits 0;  the first plain "status" call prints
+#                     "status: running", every later one "status: done"
+#   hang              status --wait never returns (until killed); status prints "status: running"
+#   absent            not handled here: the mock ssh keeps this directory off PATH
+set -euo pipefail
+
+status=${CLOUD_INIT_MOCK_STATUS:-done}
+home=${MOCK_REMOTE_HOME:-${HOME:-$PWD}}
+counter=$home/.cloud-init-status-calls
+
+if [[ ${1:-} == --version || ${1:-} == -v ]]; then
+  echo "/usr/bin/cloud-init 24.1"
+  exit 0
+fi
+if [[ ${1:-} != status ]]; then
+  echo "cloud-init mock: only 'status' is supported (got: $*)" >&2
+  exit 2
+fi
+shift
+wait=false
+for a in "$@"; do
+  [[ $a == --wait || $a == -w ]] && wait=true
+done
+
+case $status in
+  hang)
+    if [[ $wait == true ]]; then
+      while :; do sleep 1; done
+    fi
+    echo "status: running"
+    exit 0
+    ;;
+  running-then-done)
+    if [[ $wait == true ]]; then
+      echo "status: done"
+      exit 0
+    fi
+    n=0
+    [[ -f $counter ]] && n=$(cat "$counter")
+    n=$((n + 1))
+    printf '%s' "$n" > "$counter"
+    if ((n <= 1)); then echo "status: running"; else echo "status: done"; fi
+    exit 0
+    ;;
+  error)
+    echo "status: error"
+    [[ $wait == true ]] && exit 1
+    exit 0
+    ;;
+  degraded)
+    echo "status: degraded"
+    [[ $wait == true ]] && exit 2
+    exit 0
+    ;;
+  done)
+    echo "status: done"
+    exit 0
+    ;;
+  *)
+    echo "status: $status"
+    exit 0
+    ;;
+esac

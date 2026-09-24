@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Mock brew for installer tests: records "brew <args>" to $MOCK_LOG and exits 0 without doing anything.
+set -euo pipefail
+if [[ -n ${MOCK_LOG:-} ]]; then
+  mkdir -p "$(dirname "$MOCK_LOG")"
+  printf 'brew %s\n' "$*" >> "$MOCK_LOG"
+fi
+exit 0

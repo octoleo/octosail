@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Mock apt-get for installer tests: records "apt-get <args>" to $MOCK_LOG and exits 0 without doing anything.
+set -euo pipefail
+if [[ -n ${MOCK_LOG:-} ]]; then
+  mkdir -p "$(dirname "$MOCK_LOG")"
+  printf 'apt-get %s\n' "$*" >> "$MOCK_LOG"
+fi
+exit 0

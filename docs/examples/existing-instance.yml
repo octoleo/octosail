@@ -1,0 +1,70 @@
+# Run commands on an instance you already own (created outside this workflow)
+# and copy files to and from it. The private key comes from a secret; the
+# instance is started first when it is stopped. Nothing is deleted.
+# Pin @v2.0.0 instead of @v2 for reproducible builds.
+name: Deploy to an existing Lightsail instance
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  INSTANCE_NAME: staging-web
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Upload the release
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: copy
+          name: ${{ env.INSTANCE_NAME }}
+          ssh-private-key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          start-if-stopped: "true"
+          copy-source: |
+            ./src
+          copy-destination: remote:/home/ubuntu/release
+
+      - name: Install the release
+        id: deploy
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: exec
+          name: ${{ env.INSTANCE_NAME }}
+          ssh-private-key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          start-if-stopped: "true"
+          sudo: "true"
+          script: |
+            install -m 0755 /home/ubuntu/release/octosail /usr/local/bin/octosail
+            octosail version | tee /home/ubuntu/deploy.log
+
+      - name: Fetch the deploy log
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: copy
+          name: ${{ env.INSTANCE_NAME }}
+          ssh-private-key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          copy-source: |
+            remote:/home/ubuntu/deploy.log
+          copy-destination: ./deploy.log
+
+      - name: Show the result
+        env:
+          EXIT_CODE: ${{ steps.deploy.outputs.exit_code }}
+          PUBLIC_IP: ${{ steps.deploy.outputs.public_ip }}
+        run: |
+          echo "deploy exit $EXIT_CODE on $PUBLIC_IP"
+          cat deploy.log

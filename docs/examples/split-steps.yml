@@ -1,0 +1,72 @@
+# Cleanup layer B: separate create / exec / copy / delete steps. The final
+# delete runs `if: always()` and uses the name output of the create step, so
+# the instance is removed even when a middle step fails. Pair this with the
+# gc-schedule example in case the runner itself dies.
+# Pin @v2.0.0 instead of @v2 for reproducible builds.
+name: Split-step Lightsail lifecycle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Create the instance
+        id: create
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: create
+          name: build-${{ github.run_id }}-${{ github.run_attempt }}
+          bundle: small_3_0
+          ttl: 3h
+          open-ports: 22/tcp,80/tcp
+
+      - name: Build on the instance
+        id: build
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: exec
+          name: ${{ steps.create.outputs.name }}
+          env: |
+            BUILD_ID=${{ github.run_id }}
+          script: |
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx
+            echo "build $BUILD_ID on $(hostname)" | sudo tee /var/www/html/index.html
+            curl -fsS http://localhost/ | tee /home/ubuntu/build.log
+
+      - name: Fetch the build log
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: copy
+          name: ${{ steps.create.outputs.name }}
+          copy-source: |
+            remote:/home/ubuntu/build.log
+          copy-destination: ./build.log
+
+      - name: Delete the instance
+        if: always()
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: delete
+          name: ${{ steps.create.outputs.name }}
+
+      - name: Summary
+        env:
+          PUBLIC_IP: ${{ steps.create.outputs.public_ip }}
+          EXIT_CODE: ${{ steps.build.outputs.exit_code }}
+        run: |
+          echo "built on $PUBLIC_IP, remote exit $EXIT_CODE"
+          cat build.log

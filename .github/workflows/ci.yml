@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lint tools
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          fi
+          if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-yaml
+          fi
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- latest "$RUNNER_TEMP/actionlint"
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+
+      - name: Tool versions
+        run: |
+          shellcheck --version
+          actionlint -version
+
+      - name: make lint
+        run: make lint
+
+      - name: Syntax and version guard
+        run: |
+          set -euo pipefail
+          bash -n src/octosail
+          grep -q '_VERSION="2\.' src/octosail
+
+      - name: Docs consistency
+        run: bash scripts/check-docs.sh
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bats jq
+
+      - name: Install bats (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bats-core bash jq
+
+      - name: Tool versions
+        run: |
+          bash --version
+          jq --version
+          bats --version
+
+      - name: make test
+        env:
+          TERM: dumb
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: make test
+
+  action-smoke:
+    name: Action smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install octosail through the action
+        uses: ./
+        with:
+          command: install
+
+      - name: octosail is on PATH for later steps
+        env:
+          AWS_REGION: eu-west-1
+        run: octosail version && octosail doctor --offline
+
+      - name: Doctor through the action
+        id: doctor
+        uses: ./
+        env:
+          AWS_REGION: eu-west-1
+        with:
+          command: doctor
+          extra-args: --offline
+
+      - name: Assert doctor output
+        env:
+          DOCTOR_OK: ${{ steps.doctor.outputs.ok }}
+          DOCTOR_VERSION: ${{ steps.doctor.outputs.octosail_version }}
+        run: |
+          set -euo pipefail
+          echo "ok=$DOCTOR_OK version=$DOCTOR_VERSION"
+          test "$DOCTOR_OK" = "true"

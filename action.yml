@@ -1,0 +1,662 @@
+# Octosail composite action.
+#
+# Every input is handed to the script as the environment variable
+# OCTOSAIL_<INPUT_NAME> (input-name -> OCTOSAIL_INPUT_NAME, mechanically).
+# Nothing from `inputs.*` is ever interpolated into a `run:` body.
+# AWS credentials are not inputs: set them in `env:` or run
+# aws-actions/configure-aws-credentials (OIDC) before this step.
+name: Octosail
+description: Create, command and decommission Amazon Lightsail instances from a workflow
+author: Llewellyn van der Merwe
+branding:
+  icon: anchor
+  color: blue
+
+inputs:
+  # ---- what to run --------------------------------------------------------
+  command:
+    description: >-
+      The octosail command to run; one of: create delete run exec copy start
+      stop reboot status wait ports list gc doctor install (install only
+      installs dependencies and puts octosail on PATH for later run steps).
+    required: true
+  extra-args:
+    description: Extra command-line arguments for the command, one per line (blank and # lines are ignored).
+    required: false
+    default: ""
+  name:
+    description: Instance name (defaults to octosail-<run_id>-<run_attempt> inside GitHub Actions).
+    required: false
+    default: ""
+  region:
+    description: AWS region of the instance (falls back to AWS_REGION / AWS_DEFAULT_REGION).
+    required: false
+    default: ""
+  profile:
+    description: Named AWS CLI profile to use for every AWS call.
+    required: false
+    default: ""
+
+  # ---- dependency installer ----------------------------------------------
+  install-dependencies:
+    description: Install any missing dependency (aws CLI v2, jq, ssh, curl, unzip) on the runner before running the command.
+    required: false
+    default: "true"
+  aws-cli-version:
+    description: AWS CLI v2 version to install when it is missing, "latest" or an exact version such as 2.22.35.
+    required: false
+    default: "latest"
+  allow-network:
+    description: Set to "false" to make the installer fail fast (exit 80) instead of downloading anything.
+    required: false
+    default: "true"
+
+  # ---- create / run --------------------------------------------------------
+  blueprint:
+    description: Lightsail blueprint id for a new instance (default ubuntu_24_04).
+    required: false
+    default: ""
+  bundle:
+    description: Lightsail bundle id for a new instance (default nano_3_0).
+    required: false
+    default: ""
+  availability-zone:
+    description: Availability zone for a new instance (default <region>a).
+    required: false
+    default: ""
+  from-snapshot:
+    description: Create the instance from this instance snapshot instead of a blueprint.
+    required: false
+    default: ""
+  user-data:
+    description: cloud-init user data passed to the new instance as a string.
+    required: false
+    default: ""
+  user-data-file:
+    description: Path of a file whose contents are passed to the new instance as user data.
+    required: false
+    default: ""
+  key-pair:
+    description: Name of the Lightsail key pair to attach to a new instance.
+    required: false
+    default: ""
+  public-key-file:
+    description: Public key file to import as the instance key pair (idempotent).
+    required: false
+    default: ""
+  tags:
+    description: Extra tags for the new instance as a comma-separated list of key=value pairs.
+    required: false
+    default: ""
+  ttl:
+    description: Time to live after which gc may delete the instance, e.g. 90m or 2h (default 6h in Actions).
+    required: false
+    default: ""
+  open-ports:
+    description: Public ports to open on a new instance, comma-separated specs such as 22/tcp,80-443/tcp@10.0.0.0/8.
+    required: false
+    default: ""
+  static-ip:
+    description: Set to "true" to allocate and attach a static IP named octosail-<name> to the instance.
+    required: false
+    default: ""
+  static-ip-name:
+    description: Attach this existing static IP to the instance instead of allocating one.
+    required: false
+    default: ""
+  ip-address-type:
+    description: IP address type of a new instance, one of dualstack, ipv4 or ipv6.
+    required: false
+    default: ""
+  if-exists:
+    description: What to do when the instance already exists, one of reuse, fail or replace.
+    required: false
+    default: ""
+  wait:
+    description: Set to "false" to return right after the API call instead of waiting for the target state.
+    required: false
+    default: ""
+  wait-ssh:
+    description: Set to "false" to skip waiting for SSH readiness after the instance is running.
+    required: false
+    default: ""
+  cloud-init-wait:
+    description: Whether to wait for cloud-init to finish, one of auto, true or false.
+    required: false
+    default: ""
+  cloud-init-strict:
+    description: Set to "true" to treat a degraded cloud-init result as an error.
+    required: false
+    default: ""
+  create-timeout:
+    description: Seconds to wait for a new instance to reach the running state.
+    required: false
+    default: ""
+  ssh-timeout:
+    description: Seconds to wait for host keys and the SSH readiness probe.
+    required: false
+    default: ""
+  cloud-init-timeout:
+    description: Seconds to wait for cloud-init to finish on the instance.
+    required: false
+    default: ""
+
+  # ---- ssh -----------------------------------------------------------------
+  ssh-private-key:
+    description: Contents of the SSH private key to use (PEM/OpenSSH, base64 or \n-escaped); use a secret.
+    required: false
+    default: ""
+  ssh-key-file:
+    description: Path of the SSH private key file to use.
+    required: false
+    default: ""
+  ssh-key-source:
+    description: Where the private key comes from, one of auto, file, env or lightsail.
+    required: false
+    default: ""
+  ssh-user:
+    description: Remote user name (default is the instance user reported by Lightsail).
+    required: false
+    default: ""
+  ssh-host:
+    description: Host or IP to connect to (default is the instance public IP).
+    required: false
+    default: ""
+  ssh-port:
+    description: SSH port on the instance (default 22).
+    required: false
+    default: ""
+  host-key-policy:
+    description: Host key trust policy, one of lightsail, accept-new, known-hosts or none.
+    required: false
+    default: ""
+  known-hosts-file:
+    description: known_hosts file used with the known-hosts host key policy.
+    required: false
+    default: ""
+  ssh-extra-opts:
+    description: Extra ssh -o options as a comma-separated list, appended to every ssh and scp call.
+    required: false
+    default: ""
+
+  # ---- exec / run ----------------------------------------------------------
+  script:
+    description: Script body to run on the instance over SSH (bash by default).
+    required: false
+    default: ""
+  script-file:
+    description: Path of a local script file to run on the instance.
+    required: false
+    default: ""
+  env:
+    description: Environment variables exported before the remote script, one KEY=VALUE per line.
+    required: false
+    default: ""
+  cwd:
+    description: Remote directory to change into before running the script.
+    required: false
+    default: ""
+  shell:
+    description: Remote shell used to run the script (default bash).
+    required: false
+    default: ""
+  sudo:
+    description: Set to "true" to run the remote script with sudo.
+    required: false
+    default: ""
+  strict:
+    description: Set to "false" to drop the set -euo pipefail prelude from the remote script.
+    required: false
+    default: ""
+  capture:
+    description: Set to "true" to capture remote stdout and stderr into files (default true in Actions).
+    required: false
+    default: ""
+  capture-dir:
+    description: Directory that receives the captured stdout.log and stderr.log files.
+    required: false
+    default: ""
+  exec-timeout:
+    description: Seconds the remote script may run before it is killed (0 means unlimited).
+    required: false
+    default: ""
+  start-if-stopped:
+    description: Set to "true" to start a stopped instance before exec or copy.
+    required: false
+    default: ""
+  passthrough:
+    description: Set to "false" to map any non-zero remote exit status to exit code 91 instead of passing it through.
+    required: false
+    default: ""
+
+  # ---- copy ----------------------------------------------------------------
+  copy-source:
+    description: Source paths for copy, one per line; the remote side is spelled remote:PATH.
+    required: false
+    default: ""
+  copy-destination:
+    description: Destination path for copy; the remote side is spelled remote:PATH.
+    required: false
+    default: ""
+  copy-recursive:
+    description: Set to "false" to copy without scp -r.
+    required: false
+    default: ""
+
+  # ---- run -----------------------------------------------------------------
+  delete-policy:
+    description: When run deletes the instance at the end, one of created, always or never.
+    required: false
+    default: ""
+  keep-on-failure:
+    description: Set to "true" to keep the instance when the run ends with a non-zero exit code.
+    required: false
+    default: ""
+  upload:
+    description: Files to upload before the script runs, one LOCAL:REMOTE pair per line.
+    required: false
+    default: ""
+  download:
+    description: Files to download after the script ran (even when it failed), one REMOTE:LOCAL pair per line.
+    required: false
+    default: ""
+  strict-download:
+    description: Set to "true" to fail when a download source is missing on the instance.
+    required: false
+    default: ""
+  cleanup-wait:
+    description: Set to "false" to not wait for the instance to disappear after the final delete.
+    required: false
+    default: ""
+
+  # ---- delete / gc ---------------------------------------------------------
+  snapshot-first:
+    description: Take an instance snapshot before deleting; "true" for a generated name or an explicit snapshot name.
+    required: false
+    default: ""
+  release-static-ip:
+    description: Set to "true" to release the attached static IP even when octosail did not allocate it.
+    required: false
+    default: ""
+  delete-key-pair:
+    description: Set to "true" to delete the instance key pair even when octosail did not import it (never the default key pair).
+    required: false
+    default: ""
+  if-missing:
+    description: What to do when the instance does not exist, one of ok or fail.
+    required: false
+    default: ""
+  force-delete-add-ons:
+    description: Set to "true" to delete the instance together with its add-ons.
+    required: false
+    default: ""
+  delete-timeout:
+    description: Seconds to wait for a deleted instance to disappear.
+    required: false
+    default: ""
+  state-timeout:
+    description: Seconds to wait for start, stop and reboot to reach their target state.
+    required: false
+    default: ""
+  snapshot-timeout:
+    description: Seconds to wait for a snapshot to become available.
+    required: false
+    default: ""
+  older-than:
+    description: gc also selects managed instances created longer ago than this duration, e.g. 12h.
+    required: false
+    default: ""
+  run-id:
+    description: Restrict list and gc to instances tagged with this workflow run id.
+    required: false
+    default: ""
+  all-managed:
+    description: Set to "true" to make gc select every managed instance (requires yes).
+    required: false
+    default: ""
+
+  # ---- power / wait / ports / list / doctor --------------------------------
+  force-stop:
+    description: Set to "true" to force-stop the instance.
+    required: false
+    default: ""
+  hard:
+    description: Set to "true" to reboot by stopping and starting the instance.
+    required: false
+    default: ""
+  wait-for:
+    description: Conditions for wait, comma-separated from running, stopped, terminated, absent, ssh, cloud-init, operation:<id>.
+    required: false
+    default: ""
+  wait-timeout:
+    description: Seconds the wait command may block before failing with exit 83.
+    required: false
+    default: ""
+  ports-open:
+    description: Port specs to open with the ports command, comma-separated.
+    required: false
+    default: ""
+  ports-close:
+    description: Port specs to close with the ports command, comma-separated.
+    required: false
+    default: ""
+  ports-set:
+    description: Port specs that replace the whole public firewall with the ports command, comma-separated.
+    required: false
+    default: ""
+  managed:
+    description: Set to "true" to list only instances managed by octosail.
+    required: false
+    default: ""
+  expired:
+    description: Set to "true" to list only managed instances whose TTL has expired.
+    required: false
+    default: ""
+  names:
+    description: Set to "true" to make list print instance names only.
+    required: false
+    default: ""
+  offline:
+    description: Set to "true" to make doctor skip the credential check.
+    required: false
+    default: ""
+
+  # ---- global --------------------------------------------------------------
+  poll-interval:
+    description: Base number of seconds between polls of the Lightsail API.
+    required: false
+    default: ""
+  timeout:
+    description: Wall-clock budget in seconds for the whole command (default 1800).
+    required: false
+    default: ""
+  output-prefix:
+    description: Prefix added to every step output key.
+    required: false
+    default: ""
+  dry-run:
+    description: Set to "true" to log mutating calls instead of making them.
+    required: false
+    default: ""
+  "yes":
+    description: Set to "true" to allow destructive commands on instances that octosail does not manage.
+    required: false
+    default: ""
+  log-level:
+    description: Log verbosity, one of error, warn, info or debug.
+    required: false
+    default: ""
+  json:
+    description: Set to "true" to print one JSON document on stdout at the end.
+    required: false
+    default: ""
+  config:
+    description: Path of an octosail config file (KEY=VALUE lines).
+    required: false
+    default: ""
+  keep-temp:
+    description: Set to "true" to keep the run directory for debugging (key files are always removed).
+    required: false
+    default: ""
+
+outputs:
+  name:
+    description: Instance name the command acted on.
+    value: ${{ steps.octosail.outputs.name }}
+  created:
+    description: "true when this invocation created the instance."
+    value: ${{ steps.octosail.outputs.created }}
+  reused:
+    description: "true when an existing instance was reused."
+    value: ${{ steps.octosail.outputs.reused }}
+  deleted:
+    description: Whether the instance was deleted (true, false or skipped).
+    value: ${{ steps.octosail.outputs.deleted }}
+  state:
+    description: Instance state name (pending, running, stopping, stopped, ...).
+    value: ${{ steps.octosail.outputs.state }}
+  public_ip:
+    description: Public IPv4 address of the instance.
+    value: ${{ steps.octosail.outputs.public_ip }}
+  private_ip:
+    description: Private IPv4 address of the instance.
+    value: ${{ steps.octosail.outputs.private_ip }}
+  ipv6_addresses:
+    description: Comma-separated IPv6 addresses of the instance.
+    value: ${{ steps.octosail.outputs.ipv6_addresses }}
+  username:
+    description: Remote user name of the instance.
+    value: ${{ steps.octosail.outputs.username }}
+  region:
+    description: AWS region used.
+    value: ${{ steps.octosail.outputs.region }}
+  availability_zone:
+    description: Availability zone of the instance.
+    value: ${{ steps.octosail.outputs.availability_zone }}
+  blueprint_id:
+    description: Blueprint id of the instance.
+    value: ${{ steps.octosail.outputs.blueprint_id }}
+  bundle_id:
+    description: Bundle id of the instance.
+    value: ${{ steps.octosail.outputs.bundle_id }}
+  arn:
+    description: ARN of the instance.
+    value: ${{ steps.octosail.outputs.arn }}
+  key_pair_name:
+    description: Name of the key pair attached to the instance.
+    value: ${{ steps.octosail.outputs.key_pair_name }}
+  static_ip_name:
+    description: Name of the static IP attached to the instance, when any.
+    value: ${{ steps.octosail.outputs.static_ip_name }}
+  expires_at:
+    description: Expiry timestamp recorded in the octosail:expires-at tag.
+    value: ${{ steps.octosail.outputs.expires_at }}
+  ssh_ready:
+    description: "true when the SSH readiness probe succeeded."
+    value: ${{ steps.octosail.outputs.ssh_ready }}
+  cloud_init_status:
+    description: Final cloud-init status (done, error, degraded, timeout, absent, unknown or empty).
+    value: ${{ steps.octosail.outputs.cloud_init_status }}
+  exit_code:
+    description: Exit code of the command (the remote status for exec and run).
+    value: ${{ steps.octosail.outputs.exit_code }}
+  exit_name:
+    description: Symbolic name of the exit code (OK, USAGE, TIMEOUT, REMOTE, ...).
+    value: ${{ steps.octosail.outputs.exit_name }}
+  remote_exit_code:
+    description: Exit status of the remote command (exec/run); empty when it never ran or timed out.
+    value: ${{ steps.octosail.outputs.remote_exit_code }}
+  duration_seconds:
+    description: Seconds the remote script ran.
+    value: ${{ steps.octosail.outputs.duration_seconds }}
+  stdout:
+    description: Captured remote stdout (truncated at OCTOSAIL_OUTPUT_MAX_BYTES).
+    value: ${{ steps.octosail.outputs.stdout }}
+  stdout_file:
+    description: Path of the captured remote stdout file.
+    value: ${{ steps.octosail.outputs.stdout_file }}
+  stderr_file:
+    description: Path of the captured remote stderr file.
+    value: ${{ steps.octosail.outputs.stderr_file }}
+  stdout_truncated:
+    description: "true when the stdout output was truncated."
+    value: ${{ steps.octosail.outputs.stdout_truncated }}
+  changed:
+    description: "true when start, stop or reboot changed the instance state."
+    value: ${{ steps.octosail.outputs.changed }}
+  exists:
+    description: "true when status found the instance."
+    value: ${{ steps.octosail.outputs.exists }}
+  condition:
+    description: Last wait condition that was satisfied.
+    value: ${{ steps.octosail.outputs.condition }}
+  ports:
+    description: Public firewall of the instance as a comma-separated list of from-to/proto.
+    value: ${{ steps.octosail.outputs.ports }}
+  count:
+    description: Number of instances listed.
+    value: ${{ steps.octosail.outputs.count }}
+  names:
+    description: Comma-separated names of the instances listed.
+    value: ${{ steps.octosail.outputs.names }}
+  copied_files:
+    description: Number of files copied.
+    value: ${{ steps.octosail.outputs.copied_files }}
+  deleted_count:
+    description: Number of instances gc deleted.
+    value: ${{ steps.octosail.outputs.deleted_count }}
+  deleted_names:
+    description: Comma-separated names of the instances gc deleted.
+    value: ${{ steps.octosail.outputs.deleted_names }}
+  failed_names:
+    description: Comma-separated names of the instances gc failed to delete.
+    value: ${{ steps.octosail.outputs.failed_names }}
+  phase_failed:
+    description: Name of the run phase that failed (create, wait-ssh, exec, delete, ...).
+    value: ${{ steps.octosail.outputs.phase_failed }}
+  leaked_instance:
+    description: Name of an instance that could not be cleaned up and may still be running.
+    value: ${{ steps.octosail.outputs.leaked_instance }}
+  cleanup_error:
+    description: Error message of a failed cleanup step.
+    value: ${{ steps.octosail.outputs.cleanup_error }}
+  snapshot_name:
+    description: Name of the snapshot taken before deletion.
+    value: ${{ steps.octosail.outputs.snapshot_name }}
+  static_ip_released:
+    description: "true when delete released a static IP."
+    value: ${{ steps.octosail.outputs.static_ip_released }}
+  key_pair_deleted:
+    description: "true when delete removed the key pair."
+    value: ${{ steps.octosail.outputs.key_pair_deleted }}
+  dry_run:
+    description: "true when the command ran in dry-run mode."
+    value: ${{ steps.octosail.outputs.dry_run }}
+  ok:
+    description: "true when doctor found everything in order."
+    value: ${{ steps.octosail.outputs.ok }}
+  aws_account:
+    description: AWS account id reported by doctor (masked in the log).
+    value: ${{ steps.octosail.outputs.aws_account }}
+  octosail_version:
+    description: Version of the octosail script that ran.
+    value: ${{ steps.install.outputs.octosail_version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install octosail and dependencies
+      id: install
+      shell: bash
+      env:
+        OCTOSAIL_INSTALL_DEPENDENCIES: ${{ inputs.install-dependencies }}
+        OCTOSAIL_AWS_CLI_VERSION: ${{ inputs.aws-cli-version }}
+        OCTOSAIL_ALLOW_NETWORK: ${{ inputs.allow-network }}
+      run: |
+        set -euo pipefail
+        bin="$RUNNER_TEMP/octosail-bin"; mkdir -p "$bin"
+        install -m 0755 "$GITHUB_ACTION_PATH/src/octosail" "$bin/octosail"
+        echo "$bin" >> "$GITHUB_PATH"
+        if [ "$OCTOSAIL_INSTALL_DEPENDENCIES" = "true" ]; then bash "$GITHUB_ACTION_PATH/scripts/install-deps.sh"; fi
+        "$bin/octosail" doctor --offline
+        echo "octosail_version=$("$bin/octosail" version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+    - name: Run octosail
+      id: octosail
+      if: ${{ inputs.command != 'install' }}
+      shell: bash
+      env:
+        OCTOSAIL_COMMAND: ${{ inputs.command }}
+        OCTOSAIL_EXTRA_ARGS: ${{ inputs.extra-args }}
+        OCTOSAIL_NAME: ${{ inputs.name }}
+        OCTOSAIL_REGION: ${{ inputs.region }}
+        OCTOSAIL_PROFILE: ${{ inputs.profile }}
+        OCTOSAIL_INSTALL_DEPENDENCIES: ${{ inputs.install-dependencies }}
+        OCTOSAIL_AWS_CLI_VERSION: ${{ inputs.aws-cli-version }}
+        OCTOSAIL_ALLOW_NETWORK: ${{ inputs.allow-network }}
+        OCTOSAIL_BLUEPRINT: ${{ inputs.blueprint }}
+        OCTOSAIL_BUNDLE: ${{ inputs.bundle }}
+        OCTOSAIL_AVAILABILITY_ZONE: ${{ inputs.availability-zone }}
+        OCTOSAIL_FROM_SNAPSHOT: ${{ inputs.from-snapshot }}
+        OCTOSAIL_USER_DATA: ${{ inputs.user-data }}
+        OCTOSAIL_USER_DATA_FILE: ${{ inputs.user-data-file }}
+        OCTOSAIL_KEY_PAIR: ${{ inputs.key-pair }}
+        OCTOSAIL_PUBLIC_KEY_FILE: ${{ inputs.public-key-file }}
+        OCTOSAIL_TAGS: ${{ inputs.tags }}
+        OCTOSAIL_TTL: ${{ inputs.ttl }}
+        OCTOSAIL_OPEN_PORTS: ${{ inputs.open-ports }}
+        OCTOSAIL_STATIC_IP: ${{ inputs.static-ip }}
+        OCTOSAIL_STATIC_IP_NAME: ${{ inputs.static-ip-name }}
+        OCTOSAIL_IP_ADDRESS_TYPE: ${{ inputs.ip-address-type }}
+        OCTOSAIL_IF_EXISTS: ${{ inputs.if-exists }}
+        OCTOSAIL_WAIT: ${{ inputs.wait }}
+        OCTOSAIL_WAIT_SSH: ${{ inputs.wait-ssh }}
+        OCTOSAIL_CLOUD_INIT_WAIT: ${{ inputs.cloud-init-wait }}
+        OCTOSAIL_CLOUD_INIT_STRICT: ${{ inputs.cloud-init-strict }}
+        OCTOSAIL_CREATE_TIMEOUT: ${{ inputs.create-timeout }}
+        OCTOSAIL_SSH_TIMEOUT: ${{ inputs.ssh-timeout }}
+        OCTOSAIL_CLOUD_INIT_TIMEOUT: ${{ inputs.cloud-init-timeout }}
+        OCTOSAIL_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        OCTOSAIL_SSH_KEY_FILE: ${{ inputs.ssh-key-file }}
+        OCTOSAIL_SSH_KEY_SOURCE: ${{ inputs.ssh-key-source }}
+        OCTOSAIL_SSH_USER: ${{ inputs.ssh-user }}
+        OCTOSAIL_SSH_HOST: ${{ inputs.ssh-host }}
+        OCTOSAIL_SSH_PORT: ${{ inputs.ssh-port }}
+        OCTOSAIL_HOST_KEY_POLICY: ${{ inputs.host-key-policy }}
+        OCTOSAIL_KNOWN_HOSTS_FILE: ${{ inputs.known-hosts-file }}
+        OCTOSAIL_SSH_EXTRA_OPTS: ${{ inputs.ssh-extra-opts }}
+        OCTOSAIL_SCRIPT: ${{ inputs.script }}
+        OCTOSAIL_SCRIPT_FILE: ${{ inputs.script-file }}
+        OCTOSAIL_ENV: ${{ inputs.env }}
+        OCTOSAIL_CWD: ${{ inputs.cwd }}
+        OCTOSAIL_SHELL: ${{ inputs.shell }}
+        OCTOSAIL_SUDO: ${{ inputs.sudo }}
+        OCTOSAIL_STRICT: ${{ inputs.strict }}
+        OCTOSAIL_CAPTURE: ${{ inputs.capture }}
+        OCTOSAIL_CAPTURE_DIR: ${{ inputs.capture-dir }}
+        OCTOSAIL_EXEC_TIMEOUT: ${{ inputs.exec-timeout }}
+        OCTOSAIL_START_IF_STOPPED: ${{ inputs.start-if-stopped }}
+        OCTOSAIL_PASSTHROUGH: ${{ inputs.passthrough }}
+        OCTOSAIL_COPY_SOURCE: ${{ inputs.copy-source }}
+        OCTOSAIL_COPY_DESTINATION: ${{ inputs.copy-destination }}
+        OCTOSAIL_COPY_RECURSIVE: ${{ inputs.copy-recursive }}
+        OCTOSAIL_DELETE_POLICY: ${{ inputs.delete-policy }}
+        OCTOSAIL_KEEP_ON_FAILURE: ${{ inputs.keep-on-failure }}
+        OCTOSAIL_UPLOAD: ${{ inputs.upload }}
+        OCTOSAIL_DOWNLOAD: ${{ inputs.download }}
+        OCTOSAIL_STRICT_DOWNLOAD: ${{ inputs.strict-download }}
+        OCTOSAIL_CLEANUP_WAIT: ${{ inputs.cleanup-wait }}
+        OCTOSAIL_SNAPSHOT_FIRST: ${{ inputs.snapshot-first }}
+        OCTOSAIL_RELEASE_STATIC_IP: ${{ inputs.release-static-ip }}
+        OCTOSAIL_DELETE_KEY_PAIR: ${{ inputs.delete-key-pair }}
+        OCTOSAIL_IF_MISSING: ${{ inputs.if-missing }}
+        OCTOSAIL_FORCE_DELETE_ADD_ONS: ${{ inputs.force-delete-add-ons }}
+        OCTOSAIL_DELETE_TIMEOUT: ${{ inputs.delete-timeout }}
+        OCTOSAIL_STATE_TIMEOUT: ${{ inputs.state-timeout }}
+        OCTOSAIL_SNAPSHOT_TIMEOUT: ${{ inputs.snapshot-timeout }}
+        OCTOSAIL_OLDER_THAN: ${{ inputs.older-than }}
+        OCTOSAIL_RUN_ID: ${{ inputs.run-id }}
+        OCTOSAIL_ALL_MANAGED: ${{ inputs.all-managed }}
+        OCTOSAIL_FORCE_STOP: ${{ inputs.force-stop }}
+        OCTOSAIL_HARD: ${{ inputs.hard }}
+        OCTOSAIL_WAIT_FOR: ${{ inputs.wait-for }}
+        OCTOSAIL_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        OCTOSAIL_PORTS_OPEN: ${{ inputs.ports-open }}
+        OCTOSAIL_PORTS_CLOSE: ${{ inputs.ports-close }}
+        OCTOSAIL_PORTS_SET: ${{ inputs.ports-set }}
+        OCTOSAIL_MANAGED: ${{ inputs.managed }}
+        OCTOSAIL_EXPIRED: ${{ inputs.expired }}
+        OCTOSAIL_NAMES: ${{ inputs.names }}
+        OCTOSAIL_OFFLINE: ${{ inputs.offline }}
+        OCTOSAIL_POLL_INTERVAL: ${{ inputs.poll-interval }}
+        OCTOSAIL_TIMEOUT: ${{ inputs.timeout }}
+        OCTOSAIL_OUTPUT_PREFIX: ${{ inputs.output-prefix }}
+        OCTOSAIL_DRY_RUN: ${{ inputs.dry-run }}
+        OCTOSAIL_YES: ${{ inputs.yes }}
+        OCTOSAIL_LOG_LEVEL: ${{ inputs.log-level }}
+        OCTOSAIL_JSON: ${{ inputs.json }}
+        OCTOSAIL_CONFIG: ${{ inputs.config }}
+        OCTOSAIL_KEEP_TEMP: ${{ inputs.keep-temp }}
+      run: |
+        set -euo pipefail
+        exec "$RUNNER_TEMP/octosail-bin/octosail" action

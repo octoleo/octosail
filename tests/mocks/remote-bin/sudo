@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fake remote sudo: drops the leading -n/-H/-E/-- flags and runs the rest.
+# "sudo -n true" exits 0 so the remote snippets take their sudo path.
+set -euo pipefail
+while (($#)); do
+  case $1 in
+    --) shift; break ;;
+    -n|-H|-E|-S|-b|-i|-s|-k) shift ;;
+    -u|-g|-p|-C|-D|-r|-t|-U|-h) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+(($#)) || exit 0
+exec "$@"

@@ -1,305 +1,4437 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031 # option variables are deliberately overridden inside ( ) subshells for nested deletes
+###############################################################################
+# octosail - create, command and decommission Amazon Lightsail instances
+#
+# Single-file CLI for Amazon Lightsail with first-class GitHub Actions support:
+#   octosail create | exec | copy | delete | run | start | stop | reboot
+#            status | wait | ports | list | gc | doctor | action | help | version
+#
+# Documentation: README.md and docs/ in https://github.com/octoleo/octosail
+#
+# @copyright  Copyright (C) 2021 Llewellyn van der Merwe. All rights reserved.
+# @license    GNU General Public License version 2; see LICENSE
+###############################################################################
 
 # The most recent program version.
-_VERSION="1.0.0"
-_V="1.0"
-
-# Bash version required
-_bash_v=4
+_VERSION="2.0.0"
+_V="2.0"
 
 # The program full name
 PROGRAM_NAME="Octosail"
 
-###############################################################################
-# Initial checks: AWS CLI installation and configuration
-###############################################################################
+# Bash version required
+_bash_v=4
 
-# Function to check if AWS CLI is installed
-function check_aws_cli_installed() {
-    if ! command -v aws &> /dev/null; then
-        echo "AWS CLI is not installed."
-        read -p "Do you want to install it now? (y/n): " install_aws
-        if [[ "$install_aws" =~ ^[Yy]$ ]]; then
-            echo "Installing AWS CLI..."
-            # Detect OS and architecture
-            if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-                # For Linux
-                ARCH=$(uname -m)
-                if [[ "$ARCH" == "x86_64" ]]; then
-                    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-                elif [[ "$ARCH" == "aarch64" ]]; then
-                    curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-                else
-                    echo "Unsupported architecture: $ARCH"
-                    return 1
-                fi
-                unzip awscliv2.zip
-                sudo ./aws/install
-                rm -rf awscliv2.zip aws/
-            elif [[ "$OSTYPE" == "darwin"* ]]; then
-                # For macOS
-                ARCH=$(uname -m)
-                if [[ "$ARCH" == "x86_64" || "$ARCH" == "arm64" ]]; then
-                    curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
-                    sudo installer -pkg AWSCLIV2.pkg -target /
-                    rm AWSCLIV2.pkg
-                else
-                    echo "Unsupported architecture: $ARCH"
-                    return 1
-                fi
-            else
-                echo "Unsupported OS: $OSTYPE"
-                return 1
-            fi
-
-            # Check again if AWS CLI is installed
-            if ! command -v aws &> /dev/null; then
-                echo "Installation failed. Please install AWS CLI manually."
-                return 1
-            fi
-        else
-            echo "Cannot proceed without AWS CLI installed. Exiting."
-            return 1
-        fi
-    fi
-    return 0
-}
-
-# Function to check if AWS CLI is configured
-function check_aws_cli_configured() {
-    if ! aws sts get-caller-identity &> /dev/null; then
-        echo "AWS CLI is not configured."
-        read -p "Do you want to configure it now? (y/n): " configure_aws
-        if [[ "$configure_aws" =~ ^[Yy]$ ]]; then
-            echo "Running 'aws configure'..."
-            aws configure
-            # Check again if AWS CLI is configured
-            if ! aws sts get-caller-identity &> /dev/null; then
-                echo "Configuration failed or incomplete. Please configure AWS CLI manually."
-                return 1
-            fi
-        else
-            echo "Cannot proceed without AWS CLI configured. Exiting."
-            return 1
-        fi
-    fi
-    return 0
-}
-
-# Perform the checks
-check_aws_cli_installed || exit 1
-check_aws_cli_configured || exit 1
-
-###############################################################################
-# function lightsail_stop_instance
-#
-# This function stops a single Amazon Lightsail instance.
-#
-# Parameters:
-#       -n instance_name - The NAME of the instance to stop.
-#       -h - Display help.
-#
-# Returns:
-#       0 - If successful.
-#       1 - If it fails.
-###############################################################################
-function lightsail_stop_instance() {
-    local instance_name
-    local option OPTARG
-
-    function usage() {
-        echo "function lightsail_stop_instance"
-        echo "Stops a single Amazon Lightsail instance."
-        echo "  -n instance_name - The NAME of the instance to stop."
-        echo "  -h - Display help."
-        echo ""
-    }
-
-    while getopts "n:h" option; do
-        case "${option}" in
-            n) instance_name="${OPTARG}" ;;
-            h)
-                usage
-                return 0
-                ;;
-            \?)
-                echo "Invalid parameter"
-                usage
-                return 1
-                ;;
-        esac
-    done
-    export OPTIND=1
-
-    if [[ -z "$instance_name" ]]; then
-        echo "ERROR: You must provide an instance name with the -n parameter."
-        usage
-        return 1
-    fi
-
-    response=$(aws lightsail stop-instance --instance-name "${instance_name}") || {
-        echo "ERROR: AWS reports stop-instance operation failed with $response."
-        return 1
-    }
-
-    return 0
-}
-
-###############################################################################
-# function lightsail_start_instance
-#
-# This function starts a single Amazon Lightsail instance.
-#
-# Parameters:
-#       -n instance_name - The NAME of the instance to start.
-#       -h - Display help.
-#
-# Returns:
-#       0 - If successful.
-#       1 - If it fails.
-###############################################################################
-function lightsail_start_instance() {
-    local instance_name
-    local option OPTARG
-
-    function usage() {
-        echo "function lightsail_start_instance"
-        echo "Starts a single Amazon Lightsail instance."
-        echo "  -n instance_name - The NAME of the instance to start."
-        echo "  -h - Display help."
-        echo ""
-    }
-
-    while getopts "n:h" option; do
-        case "${option}" in
-            n) instance_name="${OPTARG}" ;;
-            h)
-                usage
-                return 0
-                ;;
-            \?)
-                echo "Invalid parameter"
-                usage
-                return 1
-                ;;
-        esac
-    done
-    export OPTIND=1
-
-    if [[ -z "$instance_name" ]]; then
-        echo "ERROR: You must provide an instance name with the -n parameter."
-        usage
-        return 1
-    fi
-
-    response=$(aws lightsail start-instance --instance-name "${instance_name}") || {
-        echo "ERROR: AWS reports start-instance operation failed with $response."
-        return 1
-    }
-
-    return 0
-}
-
-###############################################################################
-# function lightsail_reboot_instance
-#
-# This function reboots a single Amazon Lightsail instance.
-#
-# Parameters:
-#       -n instance_name - The NAME of the instance to reboot.
-#       -h - Display help.
-#
-# Returns:
-#       0 - If successful.
-#       1 - If it fails.
-###############################################################################
-function lightsail_reboot_instance() {
-    local instance_name
-    local option OPTARG
-
-    function usage() {
-        echo "function lightsail_reboot_instance"
-        echo "Reboots a single Amazon Lightsail instance."
-        echo "  -n instance_name - The NAME of the instance to reboot."
-        echo "  -h - Display help."
-        echo ""
-    }
-
-    while getopts "n:h" option; do
-        case "${option}" in
-            n) instance_name="${OPTARG}" ;;
-            h)
-                usage
-                return 0
-                ;;
-            \?)
-                echo "Invalid parameter"
-                usage
-                return 1
-                ;;
-        esac
-    done
-    export OPTIND=1
-
-    if [[ -z "$instance_name" ]]; then
-        echo "ERROR: You must provide an instance name with the -n parameter."
-        usage
-        return 1
-    fi
-
-    # Stop the instance
-    lightsail_stop_instance -n "${instance_name}" || {
-        echo "ERROR: Failed to stop the instance."
-        return 1
-    }
-
-    # Poll the status until it's 'stopped'
-    local state=""
-    echo "Waiting for the instance to stop..."
-    while true; do
-        state=$(aws lightsail get-instance-state --instance-name "${instance_name}" --query 'state.name' --output text) || {
-            echo "ERROR: Failed to get instance state."
-            return 1
-        }
-        if [[ "$state" == "stopped" ]]; then
-            echo "Instance has stopped."
-            break
-        else
-            echo "Current state: $state. Waiting..."
-            sleep 5
-        fi
-    done
-
-    # Wait for 1 minute
-    echo "Waiting for 1 minute before starting the instance..."
-    sleep 60
-
-    # Start the instance
-    lightsail_start_instance -n "${instance_name}" || {
-        echo "ERROR: Failed to start the instance."
-        return 1
-    }
-
-    echo "Instance rebooted successfully."
-
-    return 0
-}
-
-###############################################################################
-# Main script logic to handle --stop, --start, and --reboot directly for Lightsail.
-###############################################################################
-if [[ "$1" == "--stop" && -n "$2" ]]; then
-    lightsail_stop_instance -n "$2"
-    exit $?
-elif [[ "$1" == "--start" && -n "$2" ]]; then
-    lightsail_start_instance -n "$2"
-    exit $?
-elif [[ "$1" == "--reboot" && -n "$2" ]]; then
-    lightsail_reboot_instance -n "$2"
-    exit $?
-else
-    echo "Usage: $0 --stop <instance_name> | --start <instance_name> | --reboot <instance_name>"
-    echo "       - Stops, starts, or reboots the specified Lightsail instance."
-    exit 1
+if [[ -z ${BASH_VERSINFO:-} ]] || (( BASH_VERSINFO[0] < _bash_v )); then
+    printf 'octosail: ERROR: bash %s or newer is required (found %s). On macOS run: brew install bash\n' \
+        "$_bash_v" "${BASH_VERSION:-unknown}" >&2
+    exit 80
 fi
 
+set -Eeuo pipefail
+shopt -s extglob
+
+###############################################################################
+# Constants
+###############################################################################
+
+# Exit codes (80-91 avoid sysexits.h 64-78 and the shell-reserved 126-128+ band).
+readonly EX_OK=0
+readonly EX_GENERAL=1
+readonly EX_USAGE=2
+readonly EX_DEP=80
+readonly EX_AUTH=81
+readonly EX_NOTFOUND=82
+readonly EX_TIMEOUT=83
+readonly EX_STATE=84
+readonly EX_AWS=85
+readonly EX_SSH=86
+readonly EX_REFUSED=87
+readonly EX_CLEANUP=88
+readonly EX_CONFLICT=89
+readonly EX_CLOUDINIT=90
+readonly EX_REMOTE=91
+
+# Tags octosail writes on the resources it manages.
+readonly TAG_PREFIX="octosail:"
+readonly TAG_MANAGED="octosail:managed"
+readonly TAG_VERSION="octosail:version"
+readonly TAG_CREATED="octosail:created-at"
+readonly TAG_EXPIRES="octosail:expires-at"
+readonly TAG_RUN_ID="octosail:run-id"
+readonly TAG_REPO="octosail:repository"
+readonly TAG_STATIC_IP="octosail:static-ip"
+readonly TAG_KEY_PAIR="octosail:key-pair"
+readonly TAG_PROTECTED="octosail:protected"
+readonly TAG_FROM_INSTANCE="octosail:from-instance"
+
+readonly DEFAULT_BLUEPRINT="ubuntu_24_04"
+readonly DEFAULT_BUNDLE="nano_3_0"
+readonly DEFAULT_KEY_PAIR_PREFIX="LightsailDefaultKeyPair"
+readonly NAME_RE='^[A-Za-z0-9]([A-Za-z0-9._-]{0,253}[A-Za-z0-9])?$'
+readonly ENV_NAME_RE='^[A-Za-z_][A-Za-z0-9_]*$'
+readonly SSH_FATAL_RE='Permission denied|Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|no matching host key type|Too many authentication failures'
+readonly CLOUD_INIT_MARKER='octosail-cloud-init:'
+
+# Every command that can be dispatched (also the allow-list for `octosail action`).
+readonly COMMANDS="create delete run exec copy start stop reboot status wait ports list gc doctor action help version"
+
+###############################################################################
+# Global state
+###############################################################################
+
+COMMAND=""
+EXIT_CODE=""
+RUN_DIR=""
+CHILD_PID=""
+CLEANUP_INSTANCE=""
+CLEANUP_DONE=false
+RUN_CREATED=false
+RUN_PHASE=""
+IN_ACTIONS=false
+COLOR_ENABLED=false
+LOG_LEVEL_NUM=2
+DATE_FLAVOR=""
+GLOBAL_DEADLINE=0
+JSON_INSTANCE=""
+SSH_READY=false
+CLOUD_INIT_STATUS=""
+
+# Resolved global options.
+REGION=""
+PROFILE=""
+CONFIG_FILE=""
+JSON_MODE=false
+DRY_RUN=false
+KEEP_TEMP=false
+ASSUME_YES=false
+POLL_INTERVAL=5
+POLL_INTERVAL_MAX=15
+SLEEP_FACTOR=1
+GLOBAL_TIMEOUT=1800
+OUTPUT_FILE=""
+OUTPUT_PREFIX=""
+STEP_SUMMARY=true
+TMP_PARENT=""
+AWS_BIN="aws"
+AWS_RETRIES=4
+AWS_RETRY_BASE=2
+AWS_RETRY_CAP=30
+OPERATION_TIMEOUT=300
+OUTPUT_MAX_BYTES=65536
+declare -a AWS_EXTRA_ARGS=()
+declare -a CONFIG_KEYS=()
+
+# Outputs (GITHUB_OUTPUT) in insertion order.
+declare -A OUT=()
+declare -a OUT_ORDER=()
+
+# Last AWS call.
+AWS_OUT=""
+AWS_ERR=""
+AWS_CLASS=""
+
+# Last instance read by os::instance_get.
+INST_JSON=""
+INST_NAME=""
+INST_STATE=""
+INST_PUBLIC_IP=""
+INST_PRIVATE_IP=""
+INST_USERNAME=""
+INST_BLUEPRINT=""
+INST_BUNDLE=""
+INST_AZ=""
+INST_REGION=""
+INST_KEY_NAME=""
+INST_ARN=""
+INST_IS_STATIC=""
+INST_CREATED_AT=""
+INST_IPV6=""
+
+# SSH session state.
+SSH_USER=""
+SSH_HOST=""
+SSH_PORT=22
+SSH_KEY_FILE=""
+SSH_CERT_FILE=""
+SSH_KNOWN_HOSTS=""
+SSH_STRICT="yes"
+SSH_KEY_SOURCE_USED=""
+ACCESS_JSON=""
+ACCESS_EXPIRES=0
+declare -a SSH_OPTS=()
+declare -a SCP_OPTS=()
+declare -A HOST_KEYS_LOGGED=()
+
+# Option parsing scratch.
+OPT_FLAG=""
+OPT_VALUE=""
+OPT_NEXT=""
+OPT_HAS_NEXT=0
+OPT_INLINE=false
+OPT_SHIFT=1
+BOOL=""
+SECS=0
+
+# Command options (set from env, then flags). Prefixed OPT_ and shared by the commands.
+OPT_NAME=""
+OPT_BLUEPRINT=""
+OPT_BUNDLE=""
+OPT_AZ=""
+OPT_FROM_SNAPSHOT=""
+OPT_USER_DATA=""
+OPT_USER_DATA_FILE=""
+OPT_USER_DATA_GIVEN=false
+OPT_KEY_PAIR=""
+OPT_PUBLIC_KEY_FILE=""
+declare -a OPT_TAGS=()
+OPT_TTL=""
+declare -a OPT_OPEN_PORTS=()
+OPT_STATIC_IP=false
+OPT_STATIC_IP_NAME=""
+OPT_IP_ADDRESS_TYPE=""
+OPT_IF_EXISTS="reuse"
+OPT_WAIT=true
+OPT_WAIT_SSH=true
+OPT_CLOUD_INIT_WAIT="auto"
+OPT_CLOUD_INIT_STRICT=false
+OPT_CREATE_TIMEOUT=600
+OPT_SSH_TIMEOUT=300
+OPT_CLOUD_INIT_TIMEOUT=900
+OPT_SSH_KEY_FILE=""
+OPT_SSH_KEY_SOURCE="auto"
+OPT_SSH_USER=""
+OPT_SSH_HOST=""
+OPT_SSH_PORT=22
+OPT_HOST_KEY_POLICY="lightsail"
+OPT_KNOWN_HOSTS_FILE=""
+declare -a OPT_SSH_EXTRA_OPTS=()
+OPT_SCRIPT=""
+OPT_SCRIPT_FILE=""
+OPT_SCRIPT_SOURCE=""
+declare -a OPT_ENV=()
+OPT_CWD=""
+OPT_SHELL="bash"
+OPT_SUDO=false
+OPT_STRICT=true
+OPT_CAPTURE=""
+OPT_CAPTURE_DIR=""
+OPT_EXEC_TIMEOUT=0
+OPT_START_IF_STOPPED=false
+OPT_PASSTHROUGH=true
+OPT_COPY_RECURSIVE=true
+OPT_DELETE_POLICY="created"
+OPT_KEEP_ON_FAILURE=false
+declare -a OPT_UPLOAD=()
+declare -a OPT_DOWNLOAD=()
+OPT_STRICT_DOWNLOAD=false
+OPT_CLEANUP_WAIT=true
+OPT_SNAPSHOT_FIRST=""
+OPT_RELEASE_STATIC_IP=false
+OPT_DELETE_KEY_PAIR=false
+OPT_IF_MISSING="ok"
+OPT_FORCE_DELETE_ADD_ONS=false
+OPT_DELETE_TIMEOUT=300
+OPT_SNAPSHOT_TIMEOUT=900
+OPT_STATE_TIMEOUT=300
+OPT_WAIT_TIMEOUT=600
+OPT_FORCE_STOP=false
+OPT_HARD=false
+declare -a OPT_WAIT_FOR=()
+declare -a OPT_PORTS_OPEN=()
+declare -a OPT_PORTS_CLOSE=()
+declare -a OPT_PORTS_SET=()
+OPT_MANAGED=false
+OPT_EXPIRED=false
+OPT_RUN_ID=""
+OPT_NAMES=false
+OPT_OLDER_THAN=""
+OPT_ALL_MANAGED=false
+OPT_OFFLINE=false
+declare -a REST_ARGS=()
+declare -a POSITIONALS=()
+
+# Results shared between phases.
+CREATE_CREATED=false
+CREATE_REUSED=false
+REMOTE_EXIT=""
+REMOTE_PASSTHROUGH=false
+SCRIPT_PREPARED=false
+KEY_PAIR_NAME=""
+LEGACY=false
+EXEC_DURATION=""
+KEY_PAIR_IMPORTED_NAME=""
+RUN_EXIT=""
+
+###############################################################################
+# Logging, GitHub Actions annotations, outputs
+###############################################################################
+
+declare -A LOG_LEVELS=([error]=0 [warn]=1 [info]=2 [debug]=3)
+
+# os::log LEVEL MESSAGE... - write one log line to stderr (never to stdout).
+os::log() {
+    local level=$1
+    shift
+    local num=${LOG_LEVELS[$level]:-2}
+    (( num > LOG_LEVEL_NUM )) && return 0
+    local color="" reset=""
+    if [[ $COLOR_ENABLED == true ]]; then
+        reset=$'\033[0m'
+        case $level in
+            error) color=$'\033[1;31m' ;;
+            warn) color=$'\033[1;33m' ;;
+            info) color=$'\033[1;34m' ;;
+            debug) color=$'\033[2m' ;;
+        esac
+    fi
+    printf '%soctosail: [%s]%s %s\n' "$color" "$level" "$reset" "$*" >&2
+}
+
+os::debug() { os::log debug "$@"; }
+os::info() { os::log info "$@"; }
+
+# os::warn MESSAGE... - warning; becomes a ::warning:: annotation inside GitHub Actions.
+os::warn() {
+    if [[ $IN_ACTIONS == true ]]; then
+        printf '::warning::%s\n' "$(os::annot_escape "$*")" >&2
+    else
+        os::log warn "$@"
+    fi
+}
+
+# os::error MESSAGE... - error; becomes a ::error:: annotation inside GitHub Actions.
+os::error() {
+    if [[ $IN_ACTIONS == true ]]; then
+        printf '::error::%s\n' "$(os::annot_escape "$*")" >&2
+    else
+        os::log error "$@"
+    fi
+}
+
+# os::notice MESSAGE... - informational annotation in Actions, plain info elsewhere.
+os::notice() {
+    if [[ $IN_ACTIONS == true ]]; then
+        printf '::notice::%s\n' "$(os::annot_escape "$*")" >&2
+    else
+        os::log info "$@"
+    fi
+}
+
+# Escape a message for a workflow command (percent, newline, carriage return).
+os::annot_escape() {
+    local s=$1
+    s=${s//%/%25}
+    s=${s//$'\r'/%0D}
+    s=${s//$'\n'/%0A}
+    printf '%s' "$s"
+}
+
+# os::group TITLE / os::endgroup - collapsible log groups in Actions.
+os::group() {
+    if [[ $IN_ACTIONS == true ]]; then
+        printf '::group::%s\n' "$*" >&2
+    else
+        os::info "--- $* ---"
+    fi
+}
+
+os::endgroup() {
+    if [[ $IN_ACTIONS == true ]]; then
+        printf '::endgroup::\n' >&2
+    fi
+}
+
+# os::mask VALUE - register every non-empty line of VALUE as a secret with the Actions runner.
+os::mask() {
+    [[ $IN_ACTIONS == true && -n ${1:-} ]] || return 0
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%$'\r'}
+        [[ -n ${line//[[:space:]]/} ]] || continue
+        printf '::add-mask::%s\n' "$line" >&2
+    done <<<"$1"
+}
+
+# os::die CODE MESSAGE... - log the final error and exit with CODE (the EXIT trap does the rest).
+os::die() {
+    local code=$1
+    shift
+    EXIT_CODE=$code
+    os::error "$*"
+    exit "$code"
+}
+
+# os::exit_name CODE - symbolic name of an exit code.
+os::exit_name() {
+    if [[ -n $REMOTE_EXIT && $REMOTE_PASSTHROUGH == true && $1 == "$REMOTE_EXIT" && $1 != 0 ]]; then
+        printf 'REMOTE'
+        return 0
+    fi
+    case $1 in
+        0) printf 'OK' ;;
+        1) printf 'GENERAL' ;;
+        2) printf 'USAGE' ;;
+        80) printf 'DEPENDENCY' ;;
+        81) printf 'AUTH' ;;
+        82) printf 'NOT_FOUND' ;;
+        83) printf 'TIMEOUT' ;;
+        84) printf 'STATE' ;;
+        85) printf 'AWS_API' ;;
+        86) printf 'SSH' ;;
+        87) printf 'REFUSED' ;;
+        88) printf 'CLEANUP' ;;
+        89) printf 'CONFLICT' ;;
+        90) printf 'CLOUD_INIT' ;;
+        91) printf 'REMOTE' ;;
+        130) printf 'SIGINT' ;;
+        143) printf 'SIGTERM' ;;
+        *) printf 'EXIT_%s' "$1" ;;
+    esac
+}
+
+# os::out KEY VALUE - record an output (written to GITHUB_OUTPUT / --json at exit).
+os::out() {
+    local key=$1 val=${2-}
+    if [[ -z ${OUT[$key]+x} ]]; then
+        OUT_ORDER+=("$key")
+    fi
+    OUT[$key]=$val
+}
+
+# os::out_declare KEY... - make sure every documented key exists (empty) without overwriting.
+os::out_declare() {
+    local key
+    for key in "$@"; do
+        [[ -n ${OUT[$key]+x} ]] || os::out "$key" ""
+    done
+}
+
+# os::out_get KEY - print the current value of an output.
+os::out_get() {
+    printf '%s' "${OUT[$1]-}"
+}
+
+# os::out_flush - append every output to the GITHUB_OUTPUT file.
+os::out_flush() {
+    [[ -n $OUTPUT_FILE ]] || return 0
+    (( ${#OUT_ORDER[@]} )) || return 0
+    local key val delim
+    {
+        for key in "${OUT_ORDER[@]}"; do
+            val=${OUT[$key]}
+            if [[ $val == *$'\n'* ]]; then
+                delim="ghadelimiter_$(os::random_hex 8)"
+                printf '%s%s<<%s\n%s\n%s\n' "$OUTPUT_PREFIX" "$key" "$delim" "$val" "$delim"
+            else
+                printf '%s%s=%s\n' "$OUTPUT_PREFIX" "$key" "$val"
+            fi
+        done
+    } >>"$OUTPUT_FILE" 2>/dev/null || os::warn "cannot write outputs to $OUTPUT_FILE"
+}
+
+# os::summary - append a markdown table of the outputs to the job step summary.
+os::summary() {
+    [[ $STEP_SUMMARY == true && -n ${GITHUB_STEP_SUMMARY:-} ]] || return 0
+    (( ${#OUT_ORDER[@]} )) || return 0
+    local key val
+    {
+        printf '### octosail %s\n\n| Key | Value |\n|---|---|\n' "${COMMAND:-}"
+        for key in "${OUT_ORDER[@]}"; do
+            [[ $key == stdout ]] && continue
+            val=${OUT[$key]}
+            val=${val//$'\n'/ }
+            val=${val//|/\\|}
+            if (( ${#val} > 200 )); then
+                val="${val:0:200}..."
+            fi
+            printf '| %s | %s |\n' "\`${OUTPUT_PREFIX}${key}\`" "$val"
+        done
+        printf '\n'
+    } >>"$GITHUB_STEP_SUMMARY" 2>/dev/null || os::warn "cannot write step summary"
+}
+
+# os::json_result CODE - print the single JSON document for --json mode.
+os::json_result() {
+    [[ $JSON_MODE == true ]] || return 0
+    local code=$1 key
+    local -a args=()
+    for key in "${OUT_ORDER[@]+"${OUT_ORDER[@]}"}"; do
+        args+=(--arg "$key" "${OUT[$key]}")
+    done
+    local octo='{}'
+    if (( ${#args[@]} )); then
+        octo=$(jq -cn "${args[@]}" '$ARGS.named') || octo='{}'
+    fi
+    local instance="null"
+    if [[ -n $JSON_INSTANCE ]] && jq -e . >/dev/null 2>&1 <<<"$JSON_INSTANCE"; then
+        instance=$JSON_INSTANCE
+    fi
+    jq -n --arg command "${COMMAND:-}" --argjson code "$code" --arg name "$(os::exit_name "$code")" \
+        --argjson instance "$instance" --argjson octosail "$octo" \
+        '{command: $command, ok: ($code == 0), exit_code: $code, exit_name: $name, instance: $instance, octosail: $octosail}' \
+        2>/dev/null || printf '{"command":"%s","ok":false,"exit_code":%s,"exit_name":"%s","instance":null,"octosail":{}}\n' \
+        "${COMMAND:-}" "$code" "$(os::exit_name "$code")"
+}
+
+###############################################################################
+# Utilities
+###############################################################################
+
+os::random_hex() {
+    local bytes=${1:-4}
+    od -An -N"$bytes" -tx1 /dev/urandom | tr -d ' \n'
+}
+
+os::require_cmd() {
+    local cmd
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || os::die "$EX_DEP" "required command '$cmd' is not installed (run 'octosail doctor' or the action's dependency installer)"
+    done
+}
+
+# os::has_cmd NAME - true when NAME is on PATH.
+os::has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# os::to_bool VALUE LABEL - normalise a boolean into BOOL (true/false); usage error otherwise.
+os::to_bool() {
+    local v=${1,,} label=${2:-value}
+    case $v in
+        1|true|yes|on|y) BOOL=true ;;
+        0|false|no|off|n|"") BOOL=false ;;
+        *) os::die "$EX_USAGE" "$label: '$1' is not a boolean (use true/false)" ;;
+    esac
+}
+
+# os::to_seconds VALUE LABEL - parse a duration (Ns|Nm|Nh|Nd or bare seconds) into SECS.
+os::to_seconds() {
+    local v=$1 label=${2:-duration} n unit
+    if [[ $v =~ ^([0-9]+)([smhd]?)$ ]]; then
+        n=${BASH_REMATCH[1]}
+        unit=${BASH_REMATCH[2]}
+        case $unit in
+            m) SECS=$((n * 60)) ;;
+            h) SECS=$((n * 3600)) ;;
+            d) SECS=$((n * 86400)) ;;
+            *) SECS=$n ;;
+        esac
+        return 0
+    fi
+    os::die "$EX_USAGE" "$label: '$v' is not a duration (use e.g. 30, 90s, 15m, 6h, 2d)"
+}
+
+# os::env_normalise - validate every boolean / duration OCTOSAIL_* variable once, in place.
+os::env_normalise() {
+    local var
+    for var in OCTOSAIL_JSON OCTOSAIL_NO_COLOR OCTOSAIL_DRY_RUN OCTOSAIL_KEEP_TEMP OCTOSAIL_YES OCTOSAIL_STEP_SUMMARY \
+        OCTOSAIL_STATIC_IP OCTOSAIL_WAIT OCTOSAIL_WAIT_SSH OCTOSAIL_CLOUD_INIT_STRICT OCTOSAIL_SUDO OCTOSAIL_STRICT \
+        OCTOSAIL_CAPTURE OCTOSAIL_PASSTHROUGH OCTOSAIL_START_IF_STOPPED OCTOSAIL_COPY_RECURSIVE OCTOSAIL_KEEP_ON_FAILURE \
+        OCTOSAIL_STRICT_DOWNLOAD OCTOSAIL_CLEANUP_WAIT OCTOSAIL_RELEASE_STATIC_IP OCTOSAIL_DELETE_KEY_PAIR \
+        OCTOSAIL_FORCE_DELETE_ADD_ONS OCTOSAIL_FORCE_STOP OCTOSAIL_HARD OCTOSAIL_MANAGED OCTOSAIL_EXPIRED \
+        OCTOSAIL_ALL_MANAGED OCTOSAIL_OFFLINE OCTOSAIL_NAMES; do
+        [[ -n ${!var:-} ]] || continue
+        os::to_bool "${!var}" "$var"
+        export "$var=$BOOL"
+    done
+    for var in OCTOSAIL_TIMEOUT OCTOSAIL_TTL OCTOSAIL_CREATE_TIMEOUT OCTOSAIL_DELETE_TIMEOUT OCTOSAIL_STATE_TIMEOUT \
+        OCTOSAIL_WAIT_TIMEOUT OCTOSAIL_EXEC_TIMEOUT OCTOSAIL_SNAPSHOT_TIMEOUT OCTOSAIL_OPERATION_TIMEOUT \
+        OCTOSAIL_SSH_TIMEOUT OCTOSAIL_CLOUD_INIT_TIMEOUT OCTOSAIL_OLDER_THAN OCTOSAIL_POLL_INTERVAL \
+        OCTOSAIL_POLL_INTERVAL_MAX; do
+        [[ -n ${!var:-} ]] || continue
+        os::to_seconds "${!var}" "$var"
+        export "$var=$SECS"
+    done
+    if [[ -n ${OCTOSAIL_SLEEP_FACTOR:-} && ! ${OCTOSAIL_SLEEP_FACTOR} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        os::die "$EX_USAGE" "OCTOSAIL_SLEEP_FACTOR: '${OCTOSAIL_SLEEP_FACTOR}' is not a number"
+    fi
+    for var in OCTOSAIL_AWS_RETRIES OCTOSAIL_AWS_RETRY_BASE OCTOSAIL_AWS_RETRY_CAP OCTOSAIL_OUTPUT_MAX_BYTES OCTOSAIL_SSH_PORT; do
+        if [[ -n ${!var:-} && ! ${!var} =~ ^[0-9]+$ ]]; then
+            os::die "$EX_USAGE" "$var: '${!var}' is not a positive integer"
+        fi
+    done
+}
+
+# os::split_commas VALUE ARRAY_NAME - split a comma separated list into an array (trimmed, empties dropped).
+os::split_commas() {
+    local value=$1 dest=$2 item
+    local -a items=()
+    IFS=',' read -r -a items <<<"$value"
+    eval "$dest=()"
+    for item in "${items[@]+"${items[@]}"}"; do
+        item=${item#"${item%%[![:space:]]*}"}
+        item=${item%"${item##*[![:space:]]}"}
+        [[ -n $item ]] || continue
+        eval "$dest+=(\"\$item\")"
+    done
+}
+
+# os::split_lines VALUE ARRAY_NAME - split a newline separated list (blank and # lines dropped).
+os::split_lines() {
+    local value=$1 dest=$2 line
+    eval "$dest=()"
+    [[ -n $value ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%$'\r'}
+        [[ -n ${line//[[:space:]]/} ]] || continue
+        [[ ${line#"${line%%[![:space:]]*}"} == \#* ]] && continue
+        eval "$dest+=(\"\$line\")"
+    done <<<"$value"
+}
+
+# os::shell_quote VALUE - single-quote VALUE for a POSIX shell.
+os::shell_quote() {
+    local s=$1
+    printf "'%s'" "${s//\'/\'\\\'\'}"
+}
+
+# os::sleep SECONDS - sleep scaled by OCTOSAIL_SLEEP_FACTOR (0 in tests).
+os::sleep() {
+    local secs=$1 scaled
+    scaled=$(awk -v s="$secs" -v f="$SLEEP_FACTOR" 'BEGIN { printf "%.2f", s * f }')
+    [[ $scaled == 0.00 ]] && return 0
+    sleep "$scaled"
+}
+
+# os::backoff CURRENT [MAX] - next poll interval (x1.5, capped).
+os::backoff() {
+    local cur=$1 max=${2:-$POLL_INTERVAL_MAX} next
+    next=$(( (cur * 3 + 1) / 2 ))
+    (( next > max )) && next=$max
+    (( next < 1 )) && next=1
+    printf '%s' "$next"
+}
+
+# os::retry_delay ATTEMPT - exponential backoff with jitter for AWS retries.
+os::retry_delay() {
+    local attempt=$1 delay
+    delay=$(( AWS_RETRY_BASE * (1 << (attempt - 1)) ))
+    (( delay > AWS_RETRY_CAP )) && delay=$AWS_RETRY_CAP
+    printf '%s' "$(( delay + RANDOM % 2 ))"
+}
+
+# os::max_attempts BUDGET - attempt cap so that timeouts are deterministic with a zero sleep factor.
+os::max_attempts() {
+    local budget=$1 n
+    n=$(( (budget + POLL_INTERVAL - 1) / POLL_INTERVAL ))
+    (( n < 1 )) && n=1
+    printf '%s' "$n"
+}
+
+# os::global_deadline_check - enforce --timeout at every polling point.
+os::global_deadline_check() {
+    (( GLOBAL_DEADLINE > 0 )) || return 0
+    if (( SECONDS >= GLOBAL_DEADLINE )); then
+        os::die "$EX_TIMEOUT" "global timeout of ${GLOBAL_TIMEOUT}s exceeded"
+    fi
+}
+
+# Date helpers (GNU and BSD date).
+os::date_flavor() {
+    if [[ -z $DATE_FLAVOR ]]; then
+        if [[ $(date -u -r 0 +%Y 2>/dev/null) == 1970 ]]; then
+            DATE_FLAVOR=bsd
+        else
+            DATE_FLAVOR=gnu
+        fi
+    fi
+    printf '%s' "$DATE_FLAVOR"
+}
+
+os::now_epoch() {
+    date -u +%s
+}
+
+os::now_iso() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# os::epoch_to_iso EPOCH
+os::epoch_to_iso() {
+    if [[ $(os::date_flavor) == bsd ]]; then
+        date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ
+    else
+        date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+    fi
+}
+
+# os::iso_to_epoch ISO - prints epoch seconds (0 when unparseable). Fractions and offsets are dropped (Lightsail is UTC).
+os::iso_to_epoch() {
+    local iso=$1 base out
+    if [[ ! $iso =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} ]]; then
+        printf '0'
+        return 0
+    fi
+    base=${iso:0:19}
+    if [[ $(os::date_flavor) == bsd ]]; then
+        out=$(date -u -j -f %Y-%m-%dT%H:%M:%S "$base" +%s 2>/dev/null) || out=0
+    else
+        out=$(date -u -d "${base}Z" +%s 2>/dev/null) || out=0
+    fi
+    printf '%s' "${out:-0}"
+}
+
+# os::mkrundir - private working directory for keys, scripts and captures.
+os::mkrundir() {
+    [[ -n $RUN_DIR ]] && return 0
+    local parent=$TMP_PARENT
+    mkdir -p "$parent" 2>/dev/null || os::die "$EX_DEP" "cannot create temp parent directory $parent"
+    RUN_DIR=$(mktemp -d "$parent/octosail.XXXXXX") || os::die "$EX_DEP" "cannot create a run directory under $parent"
+    chmod 700 "$RUN_DIR"
+    export OCTOSAIL_RUN_DIR=$RUN_DIR
+    os::debug "run dir: $RUN_DIR"
+}
+
+# os::rundir_cleanup - remove key material always; remove the whole directory unless --keep-temp.
+os::rundir_cleanup() {
+    [[ -n $RUN_DIR && -d $RUN_DIR ]] || return 0
+    local f
+    for f in "$RUN_DIR/id_key" "$RUN_DIR/id_key-cert.pub" "$RUN_DIR/id_key.pub"; do
+        [[ -e $f ]] || continue
+        if os::has_cmd shred; then
+            shred -u "$f" 2>/dev/null || rm -f "$f"
+        else
+            rm -f "$f"
+        fi
+    done
+    if [[ $KEEP_TEMP == true ]]; then
+        os::info "keeping run directory $RUN_DIR"
+    else
+        rm -rf "$RUN_DIR"
+    fi
+}
+
+# os::validate_name NAME LABEL - Lightsail resource name rules.
+os::validate_name() {
+    local name=$1 label=${2:-instance name}
+    [[ -n $name ]] || os::die "$EX_USAGE" "$label is required (use --name, a positional argument or OCTOSAIL_NAME)"
+    [[ $name =~ $NAME_RE ]] || os::die "$EX_USAGE" "$label '$name' is invalid: 2-255 characters, letters, digits, '.', '-' and '_', starting and ending with a letter or digit"
+}
+
+# os::validate_env_name NAME
+os::validate_env_name() {
+    [[ $1 =~ $ENV_NAME_RE ]] || os::die "$EX_USAGE" "'$1' is not a valid environment variable name"
+}
+
+# os::in_actions - true inside GitHub Actions.
+os::in_actions() {
+    [[ ${GITHUB_ACTIONS:-} == true ]]
+}
+
+# os::default_name - the instance name used when none was given.
+os::default_name() {
+    if [[ $IN_ACTIONS == true && -n ${GITHUB_RUN_ID:-} ]]; then
+        printf 'octosail-%s-%s' "$GITHUB_RUN_ID" "${GITHUB_RUN_ATTEMPT:-1}"
+        return 0
+    fi
+    case $COMMAND in
+        create|run) printf 'octosail-%s-%s' "$(os::now_epoch)" "$(os::random_hex 2)" ;;
+        *) printf '' ;;
+    esac
+}
+
+# os::file_world_readable FILE - true when group or others can read FILE (portable, via ls).
+os::file_world_readable() {
+    local perm
+    # shellcheck disable=SC2012 # ls -l is the portable way to read the mode string (GNU/BSD stat differ)
+    perm=$(ls -ld -- "$1" 2>/dev/null | cut -c1-10) || return 1
+    [[ ${perm:4:1} == r || ${perm:7:1} == r ]]
+}
+
+# os::config_load FILE - KEY=VALUE config file, never sourced; only fills unset/empty variables.
+os::config_load() {
+    local file=$1 line key val n=0
+    [[ -n $file && $file != /dev/null && -f $file ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        n=$((n + 1))
+        line=${line%$'\r'}
+        line=${line#"${line%%[![:space:]]*}"}
+        [[ -z $line || $line == \#* ]] && continue
+        if [[ $line =~ ^(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            key=${BASH_REMATCH[2]}
+            val=${BASH_REMATCH[3]}
+            val=${val%"${val##*[![:space:]]}"}
+            if (( ${#val} >= 2 )); then
+                case $val in
+                    \"*\") val=${val:1:${#val}-2} ;;
+                    \'*\') val=${val:1:${#val}-2} ;;
+                esac
+            fi
+            [[ $key =~ ^(OCTOSAIL|AWS)_[A-Z0-9_]+$ ]] || os::die "$EX_USAGE" "$file:$n: unsupported key '$key' (only OCTOSAIL_* and AWS_* keys are accepted)"
+            if [[ -z ${!key:-} ]]; then
+                export "$key=$val"
+                CONFIG_KEYS+=("$key")
+            fi
+        else
+            os::die "$EX_USAGE" "$file:$n: cannot parse line (expected KEY=VALUE)"
+        fi
+    done <"$file"
+    CONFIG_FILE=$file
+    if grep -qE '^[[:space:]]*(export[[:space:]]+)?(AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|OCTOSAIL_SSH_PRIVATE_KEY)[[:space:]]*=' "$file" 2>/dev/null \
+        && os::file_world_readable "$file"; then
+        os::warn "config file $file contains secrets and is readable by other users (chmod 600 $file)"
+    fi
+}
+
+# os::config_find - the first existing config file from the search list.
+os::config_find() {
+    local candidate
+    for candidate in "./.octosail.conf" "${XDG_CONFIG_HOME:-$HOME/.config}/octosail/config" "$HOME/.octosail.conf"; do
+        if [[ -f $candidate ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    printf ''
+}
+
+# os::redact_argv ARGV... - argv for debug logs with secret-bearing values replaced.
+os::redact_argv() {
+    local -a out=()
+    local redact_next=false a
+    for a in "$@"; do
+        if [[ $redact_next == true ]]; then
+            out+=("<redacted>")
+            redact_next=false
+            continue
+        fi
+        case $a in
+            --user-data|--public-key-base64|--private-key-base64) out+=("$a"); redact_next=true ;;
+            --user-data=*|--public-key-base64=*) out+=("${a%%=*}=<redacted>") ;;
+            *) out+=("$a") ;;
+        esac
+    done
+    printf '%q ' "${out[@]}"
+}
+
+# os::with_timeout LIMIT STDIN_FILE STDOUT_FILE STDERR_FILE COMMAND... - run COMMAND with a bash watchdog.
+# STDOUT_FILE/STDERR_FILE may be "-" to inherit. Returns the command's status, or 124 when killed after LIMIT
+# seconds (LIMIT 0 = unlimited). The child PID is exported in CHILD_PID for the signal handler.
+os::with_timeout() {
+    local limit=$1 stdin=$2 stdout=$3 stderr=$4
+    shift 4
+    local rc=0 marker watchdog=""
+    marker="$RUN_DIR/timeout.$$.$RANDOM.$RANDOM"
+    if [[ $stdout == - && $stderr == - ]]; then
+        "$@" <"$stdin" &
+    elif [[ $stdout == - ]]; then
+        "$@" <"$stdin" 2>"$stderr" &
+    elif [[ $stderr == - ]]; then
+        "$@" <"$stdin" >"$stdout" &
+    else
+        "$@" <"$stdin" >"$stdout" 2>"$stderr" &
+    fi
+    CHILD_PID=$!
+    if (( limit > 0 )); then
+        (
+            waited=0
+            while (( waited < limit )); do
+                sleep 1
+                waited=$((waited + 1))
+                kill -0 "$CHILD_PID" 2>/dev/null || exit 0
+            done
+            : >"$marker"
+            kill -TERM "$CHILD_PID" 2>/dev/null || exit 0
+            sleep 2
+            kill -KILL "$CHILD_PID" 2>/dev/null || true
+        ) &
+        watchdog=$!
+    fi
+    wait "$CHILD_PID" || rc=$?
+    CHILD_PID=""
+    if [[ -n $watchdog ]]; then
+        kill "$watchdog" 2>/dev/null || true
+        wait "$watchdog" 2>/dev/null || true
+    fi
+    if [[ -f $marker ]]; then
+        rm -f "$marker"
+        return 124
+    fi
+    return "$rc"
+}
+
+# os::json_tags "k=v"... - Lightsail tag list as JSON.
+os::json_tags() {
+    if (( $# == 0 )); then
+        printf '[]'
+        return 0
+    fi
+    jq -cn --args '$ARGS.positional | map(capture("^(?<key>[^=]+)=(?<value>.*)$") // {key: ., value: ""})' "$@"
+}
+
+PORT_JSON=""
+
+# os::parse_port_spec SPEC - "[PORT[-PORT]/]PROTO[@CIDR[,CIDR...]]" to a Lightsail PortInfo JSON object in PORT_JSON.
+os::parse_port_spec() {
+    local spec=$1 left ports="" proto cidrs="" from to
+    left=${spec%%@*}
+    [[ $spec == *@* ]] && cidrs=${spec#*@}
+    if [[ $left == */* ]]; then
+        ports=${left%/*}
+        proto=${left##*/}
+    else
+        proto=$left
+    fi
+    proto=${proto,,}
+    case $proto in
+        tcp|udp)
+            [[ -n $ports ]] || os::die "$EX_USAGE" "port spec '$spec': a port or port range is required for $proto"
+            if [[ $ports =~ ^([0-9]{1,5})(-([0-9]{1,5}))?$ ]]; then
+                from=${BASH_REMATCH[1]}
+                to=${BASH_REMATCH[3]:-$from}
+            else
+                os::die "$EX_USAGE" "port spec '$spec': '$ports' is not a port or PORT-PORT range"
+            fi
+            (( from <= 65535 && to <= 65535 && from <= to )) || os::die "$EX_USAGE" "port spec '$spec': ports must be 0-65535 and FROM <= TO"
+            ;;
+        icmp|icmpv6)
+            [[ -z $ports ]] || os::die "$EX_USAGE" "port spec '$spec': $proto does not take a port"
+            from=-1
+            to=-1
+            ;;
+        all)
+            [[ -z $ports ]] || os::die "$EX_USAGE" "port spec '$spec': 'all' does not take a port"
+            from=0
+            to=65535
+            ;;
+        *) os::die "$EX_USAGE" "port spec '$spec': unknown protocol '$proto' (tcp, udp, icmp, icmpv6, all)" ;;
+    esac
+    local -a all=() v4=() v6=()
+    local c
+    if [[ -n $cidrs ]]; then
+        os::split_commas "$cidrs" all
+        for c in "${all[@]+"${all[@]}"}"; do
+            if [[ $c == *:* ]]; then
+                v6+=("$c")
+            else
+                v4+=("$c")
+            fi
+        done
+    else
+        case $proto in
+            icmp) v4=("0.0.0.0/0") ;;
+            icmpv6) v6=("::/0") ;;
+            *) v4=("0.0.0.0/0"); v6=("::/0") ;;
+        esac
+    fi
+    PORT_JSON=$(jq -cn --argjson from "$from" --argjson to "$to" --arg proto "$proto" \
+        --argjson v4 "$(printf '%s\n' "${v4[@]+"${v4[@]}"}" | jq -R . | jq -cs 'map(select(length > 0))')" \
+        --argjson v6 "$(printf '%s\n' "${v6[@]+"${v6[@]}"}" | jq -R . | jq -cs 'map(select(length > 0))')" \
+        '{fromPort: $from, toPort: $to, protocol: $proto} + (if ($v4 | length) > 0 then {cidrs: $v4} else {} end) + (if ($v6 | length) > 0 then {ipv6Cidrs: $v6} else {} end)')
+}
+
+# os::port_summary INSTANCE_JSON - "from-to/proto" comma list from instance.networking.ports.
+os::port_summary() {
+    jq -r '[(.networking.ports // [])[] | (if .fromPort == .toPort then (.fromPort|tostring) else ((.fromPort|tostring) + "-" + (.toPort|tostring)) end) + "/" + (.protocol|ascii_downcase)] | join(",")' <<<"$1"
+}
+
+###############################################################################
+# AWS layer
+###############################################################################
+
+# os::aws_is_mutating OP - operations skipped under --dry-run.
+os::aws_is_mutating() {
+    case $1 in
+        create-*|delete-*|start-*|stop-*|reboot-*|open-*|close-*|put-*|allocate-*|attach-*|detach-*|release-*|import-*|tag-*|untag-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# os::aws_classify RC STDERR - notfound | auth | throttle | transient | invalid | missing | other
+os::aws_classify() {
+    local rc=$1 err=$2
+    if (( rc == 127 || rc == 126 )); then
+        printf 'missing'
+        return 0
+    fi
+    local re_auth='AccessDenied|Unauthorized|ExpiredToken|InvalidClientTokenId|UnrecognizedClient|InvalidSignature|Unable to locate credentials|Partial credentials|security token|not authorized|InvalidAccessKeyId|SignatureDoesNotMatch|AuthFailure'
+    local re_notfound='NotFoundException|does not exist|not found'
+    local re_throttle='Throttl|TooManyRequests|RequestLimitExceeded|Rate exceeded'
+    local re_transient='ServiceUnavailable|ServiceException|InternalError|InternalFailure|RequestTimeout|Could not connect|Connection reset|Read timeout|EndpointConnectionError|timed out|Temporary failure|502|503|504'
+    local re_invalid='InvalidInputException|OperationFailureException|ServiceLimitExceeded|AccountSetupInProgress|ValidationError|ValidationException'
+    local restore
+    restore=$(shopt -p nocasematch)
+    shopt -s nocasematch
+    local class=other
+    if [[ $err =~ $re_auth ]]; then
+        class=auth
+    elif [[ $err =~ $re_notfound ]]; then
+        class=notfound
+    elif [[ $err =~ $re_throttle ]]; then
+        class=throttle
+    elif [[ $err =~ $re_transient ]]; then
+        class=transient
+    elif [[ $err =~ $re_invalid ]]; then
+        class=invalid
+    fi
+    eval "$restore"
+    printf '%s' "$class"
+}
+
+# os::aws_create_name ARGS... - the first instance name in a create-instances call (for the transient re-check).
+os::aws_create_name() {
+    local prev="" a
+    for a in "$@"; do
+        if [[ $prev == --instance-names ]]; then
+            jq -r 'if type == "array" then .[0] // empty else . end' <<<"$a" 2>/dev/null || printf '%s' "$a"
+            return 0
+        fi
+        prev=$a
+    done
+    printf ''
+}
+
+# os::aws SERVICE OP ARGS... - run one AWS CLI call with retries and classification.
+# Sets AWS_OUT (stdout JSON), AWS_ERR (last stderr), AWS_CLASS. Returns 0, EX_NOTFOUND or EX_AWS;
+# authentication failures and a missing CLI terminate the program (EX_AUTH / EX_DEP).
+os::aws() {
+    local service=$1 op=$2
+    shift 2
+    local -a cmd=("$AWS_BIN" --output json --no-cli-pager --cli-connect-timeout 10 --cli-read-timeout 60 --region "$REGION")
+    if [[ -n $PROFILE ]]; then
+        cmd+=(--profile "$PROFILE")
+    fi
+    if (( ${#AWS_EXTRA_ARGS[@]} )); then
+        cmd+=("${AWS_EXTRA_ARGS[@]}")
+    fi
+    cmd+=("$service" "$op" "$@")
+    AWS_OUT=""
+    AWS_ERR=""
+    AWS_CLASS=""
+    if [[ $DRY_RUN == true ]] && os::aws_is_mutating "$op"; then
+        os::info "DRY-RUN: $(os::redact_argv "${cmd[@]}")"
+        AWS_OUT='{"operations":[],"dryRun":true}'
+        return 0
+    fi
+    local attempt=0 rc delay errfile="$RUN_DIR/aws.err" name
+    while :; do
+        rc=0
+        os::debug "aws: $(os::redact_argv "${cmd[@]}")"
+        AWS_OUT=$(AWS_PAGER="" AWS_CLI_AUTO_PROMPT=off AWS_MAX_ATTEMPTS=1 AWS_RETRY_MODE=standard "${cmd[@]}" 2>"$errfile" </dev/null) || rc=$?
+        if (( rc == 0 )); then
+            return 0
+        fi
+        AWS_ERR=$(tr -d '\r' <"$errfile" 2>/dev/null | sed -e 's/^[[:space:]]*//' | grep -v '^$' | tail -n 5 | tr '\n' ' ' | sed -e 's/[[:space:]]*$//')
+        [[ -n $AWS_ERR ]] || AWS_ERR="aws exited with status $rc"
+        AWS_CLASS=$(os::aws_classify "$rc" "$AWS_ERR")
+        case $AWS_CLASS in
+            notfound) return "$EX_NOTFOUND" ;;
+            auth) os::die "$EX_AUTH" "AWS authentication or authorization failed ($service $op): $AWS_ERR" ;;
+            missing) os::die "$EX_DEP" "cannot execute the AWS CLI '$AWS_BIN': $AWS_ERR" ;;
+            invalid) return "$EX_AWS" ;;
+            throttle|transient)
+                if [[ $AWS_CLASS == transient && $op == create-instances* ]]; then
+                    name=$(os::aws_create_name "$@")
+                    if [[ -n $name ]] && os::aws_exists_quiet "$name"; then
+                        os::warn "create call failed transiently but instance '$name' exists; continuing with it"
+                        AWS_OUT='{"operations":[]}'
+                        return 0
+                    fi
+                fi
+                attempt=$((attempt + 1))
+                if (( attempt > AWS_RETRIES )); then
+                    return "$EX_AWS"
+                fi
+                delay=$(os::retry_delay "$attempt")
+                os::warn "aws $service $op failed ($AWS_CLASS); retry $attempt/$AWS_RETRIES in ${delay}s: $AWS_ERR"
+                os::sleep "$delay"
+                ;;
+            *) return "$EX_AWS" ;;
+        esac
+    done
+}
+
+# os::aws_exists_quiet NAME - true when get-instance succeeds (no retries, no side effects on AWS_* beyond the call).
+os::aws_exists_quiet() {
+    local saved_retries=$AWS_RETRIES rc=0
+    AWS_RETRIES=0
+    os::aws lightsail get-instance --instance-name "$1" || rc=$?
+    AWS_RETRIES=$saved_retries
+    (( rc == 0 ))
+}
+
+# os::aws_must SERVICE OP ARGS... - like os::aws but any failure terminates with the right exit code.
+os::aws_must() {
+    local rc=0
+    os::aws "$@" || rc=$?
+    case $rc in
+        0) return 0 ;;
+        "$EX_NOTFOUND") os::die "$EX_NOTFOUND" "$1 $2: resource not found: $AWS_ERR" ;;
+        *) os::die "$EX_AWS" "$1 $2 failed: $AWS_ERR" ;;
+    esac
+}
+
+# os::aws_paginate SERVICE OP JQ_KEY ARGS... - follow nextPageToken; AWS_OUT becomes the merged JSON array.
+os::aws_paginate() {
+    local service=$1 op=$2 key=$3
+    shift 3
+    local token="" merged='[]' page rc=0
+    while :; do
+        if [[ -n $token ]]; then
+            os::aws "$service" "$op" "$@" --page-token "$token" || rc=$?
+        else
+            os::aws "$service" "$op" "$@" || rc=$?
+        fi
+        (( rc == 0 )) || return "$rc"
+        page=$(jq -c --arg k "$key" '.[$k] // []' <<<"$AWS_OUT")
+        merged=$(jq -cn --argjson a "$merged" --argjson b "$page" '$a + $b')
+        token=$(jq -r '.nextPageToken // empty' <<<"$AWS_OUT")
+        [[ -n $token ]] || break
+    done
+    AWS_OUT=$merged
+    return 0
+}
+
+# os::op_wait RESPONSE_JSON [BUDGET] - wait for every operation in an AWS response to reach a terminal state.
+os::op_wait() {
+    local json=$1 budget=${2:-$OPERATION_TIMEOUT}
+    local pending failed id status err deadline attempts max_attempts interval rc
+    failed=$(jq -r '((.operations // []) + (if .operation then [.operation] else [] end))[] | select((.status // "") | ascii_downcase == "failed") | ((.errorCode // "unknown") + ": " + (.errorDetails // "no details"))' <<<"$json" 2>/dev/null | head -n1)
+    if [[ -n $failed ]]; then
+        os::die "$EX_AWS" "Lightsail operation failed: $failed"
+    fi
+    pending=$(jq -r '((.operations // []) + (if .operation then [.operation] else [] end))[] | select(.isTerminal != true and ((.status // "") | ascii_downcase | IN("succeeded", "completed") | not)) | .id // empty' <<<"$json" 2>/dev/null)
+    [[ -n $pending ]] || return 0
+    for id in $pending; do
+        deadline=$((SECONDS + budget))
+        attempts=0
+        max_attempts=$(os::max_attempts "$budget")
+        interval=$POLL_INTERVAL
+        while :; do
+            os::global_deadline_check
+            rc=0
+            os::aws lightsail get-operation --operation-id "$id" || rc=$?
+            if (( rc == EX_NOTFOUND )); then
+                os::debug "operation $id not found yet; retrying"
+            elif (( rc != 0 )); then
+                os::die "$EX_AWS" "get-operation $id failed: $AWS_ERR"
+            else
+                status=$(jq -r '.operation.status // "" | ascii_downcase' <<<"$AWS_OUT")
+                case $status in
+                    succeeded|completed) break ;;
+                    failed)
+                        err=$(jq -r '(.operation.errorCode // "unknown") + ": " + (.operation.errorDetails // "no details")' <<<"$AWS_OUT")
+                        os::die "$EX_AWS" "Lightsail operation $id failed: $err"
+                        ;;
+                esac
+                if [[ $(jq -r '.operation.isTerminal // false' <<<"$AWS_OUT") == true ]]; then
+                    break
+                fi
+            fi
+            attempts=$((attempts + 1))
+            if (( SECONDS >= deadline || attempts >= max_attempts )); then
+                os::die "$EX_TIMEOUT" "operation $id did not complete within ${budget}s (last status: ${status:-unknown})"
+            fi
+            os::sleep "$interval"
+            interval=$(os::backoff "$interval")
+        done
+    done
+    return 0
+}
+
+# os::instance_get NAME - read one instance into INST_* (returns EX_NOTFOUND when it does not exist).
+os::instance_get() {
+    local name=$1 rc=0 tsv
+    os::aws lightsail get-instance --instance-name "$name" || rc=$?
+    if (( rc == EX_NOTFOUND )); then
+        INST_JSON=""
+        return "$EX_NOTFOUND"
+    fi
+    (( rc == 0 )) || os::die "$EX_AWS" "get-instance $name failed: $AWS_ERR"
+    INST_JSON=$(jq -c '.instance // {}' <<<"$AWS_OUT")
+    tsv=$(jq -r '[.name, .state.name, .publicIpAddress, .privateIpAddress, .username, .blueprintId, .bundleId,
+        .location.availabilityZone, .location.regionName, .sshKeyName, .arn, .isStaticIp, .createdAt,
+        ((.ipv6Addresses // []) | join(","))]
+        | map(if . == null then "" else tostring end) | join("\u001f")' <<<"$INST_JSON")
+    IFS=$'\x1f' read -r INST_NAME INST_STATE INST_PUBLIC_IP INST_PRIVATE_IP INST_USERNAME INST_BLUEPRINT INST_BUNDLE \
+        INST_AZ INST_REGION INST_KEY_NAME INST_ARN INST_IS_STATIC INST_CREATED_AT INST_IPV6 <<<"$tsv"
+    return 0
+}
+
+# os::instance_tag KEY - value of a tag on the last read instance (empty when absent).
+os::instance_tag() {
+    [[ -n $INST_JSON ]] || return 0
+    jq -r --arg k "$1" '[(.tags // [])[] | select(.key == $k) | .value] | first // empty' <<<"$INST_JSON"
+}
+
+# os::instance_is_managed / os::instance_is_protected - tag checks on the last read instance.
+os::instance_is_managed() {
+    [[ $(os::instance_tag "$TAG_MANAGED") == true ]]
+}
+
+os::instance_is_protected() {
+    [[ $(os::instance_tag "$TAG_PROTECTED") == true ]]
+}
+
+# os::instance_tags_set NAME TAGS_JSON - tag-resource with a JSON list.
+os::instance_tags_set() {
+    local name=$1 tags=$2
+    [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || return 0
+    os::aws_must lightsail tag-resource --resource-name "$name" --tags "$tags"
+    os::op_wait "$AWS_OUT"
+}
+
+# os::state_wait NAME TARGET BUDGET - poll get-instance-state until TARGET. Returns 0, EX_TIMEOUT or EX_STATE.
+os::state_wait() {
+    local name=$1 target=$2 budget=$3
+    local deadline=$((SECONDS + budget)) attempts=0 max_attempts interval=$POLL_INTERVAL state="" last="" rc
+    max_attempts=$(os::max_attempts "$budget")
+    if [[ $DRY_RUN == true ]]; then
+        os::info "DRY-RUN: would wait for '$name' to reach '$target'"
+        INST_STATE=$target
+        return 0
+    fi
+    while :; do
+        os::global_deadline_check
+        rc=0
+        os::aws lightsail get-instance-state --instance-name "$name" || rc=$?
+        if (( rc == EX_NOTFOUND )); then
+            if [[ $target == absent ]]; then
+                INST_STATE="absent"
+                return 0
+            fi
+            os::die "$EX_STATE" "instance '$name' disappeared while waiting for state '$target'"
+        fi
+        (( rc == 0 )) || os::die "$EX_AWS" "get-instance-state $name failed: $AWS_ERR"
+        state=$(jq -r '.state.name // empty' <<<"$AWS_OUT")
+        INST_STATE=$state
+        if [[ $state == "$target" ]]; then
+            return 0
+        fi
+        case "$target:$state" in
+            running:terminated|running:shutting-down|stopped:terminated|stopped:shutting-down)
+                os::die "$EX_STATE" "instance '$name' is '$state'; it can never reach '$target'"
+                ;;
+        esac
+        if [[ $state != "$last" ]]; then
+            os::info "instance '$name' state: ${state:-unknown} (waiting for $target)"
+            last=$state
+        fi
+        attempts=$((attempts + 1))
+        if (( SECONDS >= deadline || attempts >= max_attempts )); then
+            return "$EX_TIMEOUT"
+        fi
+        os::sleep "$interval"
+        interval=$(os::backoff "$interval")
+    done
+}
+
+# os::absent_wait NAME BUDGET - poll get-instance until it is gone.
+os::absent_wait() {
+    local name=$1 budget=$2
+    local deadline=$((SECONDS + budget)) attempts=0 max_attempts interval=$POLL_INTERVAL rc
+    max_attempts=$(os::max_attempts "$budget")
+    if [[ $DRY_RUN == true ]]; then
+        os::info "DRY-RUN: would wait for '$name' to be deleted"
+        return 0
+    fi
+    while :; do
+        os::global_deadline_check
+        rc=0
+        os::aws lightsail get-instance --instance-name "$name" || rc=$?
+        if (( rc == EX_NOTFOUND )); then
+            return 0
+        fi
+        (( rc == 0 )) || os::die "$EX_AWS" "get-instance $name failed: $AWS_ERR"
+        attempts=$((attempts + 1))
+        if (( SECONDS >= deadline || attempts >= max_attempts )); then
+            return "$EX_TIMEOUT"
+        fi
+        os::sleep "$interval"
+        interval=$(os::backoff "$interval")
+    done
+}
+
+# os::key_fingerprint_md5 PUBFILE - lower-case colon-separated MD5 fingerprint of a public key file.
+os::key_fingerprint_md5() {
+    local out
+    out=$(ssh-keygen -l -E md5 -f "$1" 2>/dev/null) || return 1
+    out=${out#* }
+    out=${out%% *}
+    out=${out#MD5:}
+    printf '%s' "${out,,}"
+}
+
+# os::key_pair_ensure PUBFILE [NAME] - import a public key idempotently. Sets KEY_PAIR_NAME and KEY_PAIR_IMPORTED_NAME.
+os::key_pair_ensure() {
+    local pub=$1 name=${2:-} local_fp remote_fp rc=0 b64
+    [[ -f $pub ]] || os::die "$EX_USAGE" "public key file '$pub' not found"
+    ssh-keygen -l -f "$pub" >/dev/null 2>&1 || os::die "$EX_USAGE" "'$pub' is not a valid OpenSSH public key"
+    local_fp=$(os::key_fingerprint_md5 "$pub") || local_fp=""
+    if [[ -z $name ]]; then
+        name="octosail-$(awk '{print $1" "$2}' "$pub" | tr -d '\n' | { if os::has_cmd sha256sum; then sha256sum; else shasum -a 256; fi; } | cut -c1-12)"
+    fi
+    KEY_PAIR_NAME=$name
+    os::aws lightsail get-key-pair --key-pair-name "$name" || rc=$?
+    if (( rc == 0 )); then
+        remote_fp=$(jq -r '.keyPair.fingerprint // empty' <<<"$AWS_OUT")
+        remote_fp=${remote_fp#MD5:}
+        remote_fp=${remote_fp,,}
+        if [[ $remote_fp =~ ^([0-9a-f]{2}:){15}[0-9a-f]{2}$ && -n $local_fp ]]; then
+            if [[ $remote_fp == "$local_fp" ]]; then
+                os::info "key pair '$name' already exists with the same fingerprint; reusing it"
+            else
+                os::die "$EX_CONFLICT" "key pair '$name' exists with a different fingerprint ($remote_fp vs $local_fp); choose another --key-pair name"
+            fi
+        else
+            os::warn "key pair '$name' exists but its fingerprint could not be compared; reusing it by name"
+        fi
+        return 0
+    fi
+    (( rc == EX_NOTFOUND )) || os::die "$EX_AWS" "get-key-pair $name failed: $AWS_ERR"
+    b64=$(base64 <"$pub" | tr -d '\n')
+    os::info "importing public key '$pub' as key pair '$name'"
+    os::aws_must lightsail import-key-pair --key-pair-name "$name" --public-key-base64 "$b64"
+    os::op_wait "$AWS_OUT"
+    KEY_PAIR_IMPORTED_NAME=$name
+    return 0
+}
+
+# os::static_ip_ensure INSTANCE IPNAME - allocate/attach a static IP idempotently. Sets STATIC_IP_ALLOCATED_NAME when allocated.
+os::static_ip_ensure() {
+    local instance=$1 ipname=$2 rc=0 attached_to is_attached
+    os::aws lightsail get-static-ip --static-ip-name "$ipname" || rc=$?
+    if (( rc == 0 )); then
+        attached_to=$(jq -r '.staticIp.attachedTo // empty' <<<"$AWS_OUT")
+        is_attached=$(jq -r '.staticIp.isAttached // false' <<<"$AWS_OUT")
+        if [[ $is_attached == true && $attached_to == "$instance" ]]; then
+            os::info "static IP '$ipname' is already attached to '$instance'"
+            return 0
+        fi
+        if [[ $is_attached == true ]]; then
+            os::die "$EX_CONFLICT" "static IP '$ipname' is attached to '$attached_to', not to '$instance'"
+        fi
+        os::info "reusing unattached static IP '$ipname'"
+    else
+        (( rc == EX_NOTFOUND )) || os::die "$EX_AWS" "get-static-ip $ipname failed: $AWS_ERR"
+        os::info "allocating static IP '$ipname'"
+        os::aws_must lightsail allocate-static-ip --static-ip-name "$ipname"
+        os::op_wait "$AWS_OUT"
+    fi
+    os::info "attaching static IP '$ipname' to '$instance'"
+    os::aws_must lightsail attach-static-ip --static-ip-name "$ipname" --instance-name "$instance"
+    os::op_wait "$AWS_OUT"
+    return 0
+}
+
+# os::static_ip_release IPNAME - detach (if attached) and release a static IP; tolerant of NotFound.
+os::static_ip_release() {
+    local ipname=$1 rc=0 is_attached
+    os::aws lightsail get-static-ip --static-ip-name "$ipname" || rc=$?
+    if (( rc == EX_NOTFOUND )); then
+        os::info "static IP '$ipname' no longer exists"
+        return 0
+    fi
+    (( rc == 0 )) || os::die "$EX_AWS" "get-static-ip $ipname failed: $AWS_ERR"
+    is_attached=$(jq -r '.staticIp.isAttached // false' <<<"$AWS_OUT")
+    if [[ $is_attached == true ]]; then
+        os::info "detaching static IP '$ipname'"
+        os::aws_must lightsail detach-static-ip --static-ip-name "$ipname"
+        os::op_wait "$AWS_OUT"
+    fi
+    os::info "releasing static IP '$ipname'"
+    os::aws_must lightsail release-static-ip --static-ip-name "$ipname"
+    os::op_wait "$AWS_OUT"
+    return 0
+}
+
+STATIC_IP_FOUND=""
+
+# os::static_ip_find_attached INSTANCE - STATIC_IP_FOUND = name of the static IP attached to INSTANCE (paged lookup).
+os::static_ip_find_attached() {
+    local instance=$1
+    STATIC_IP_FOUND=""
+    os::aws_paginate lightsail get-static-ips staticIps || os::die "$EX_AWS" "get-static-ips failed: $AWS_ERR"
+    STATIC_IP_FOUND=$(jq -r --arg i "$instance" '[.[] | select(.isAttached == true and .attachedTo == $i) | .name] | first // empty' <<<"$AWS_OUT")
+}
+
+# os::snapshot_create INSTANCE SNAPNAME BUDGET - create an instance snapshot and wait until it is available.
+os::snapshot_create() {
+    local instance=$1 snap=$2 budget=$3 rc=0 state deadline attempts max_attempts interval tags
+    os::aws lightsail get-instance-snapshot --instance-snapshot-name "$snap" || rc=$?
+    if (( rc == 0 )); then
+        os::die "$EX_CONFLICT" "snapshot '$snap' already exists"
+    fi
+    (( rc == EX_NOTFOUND )) || os::die "$EX_AWS" "get-instance-snapshot $snap failed: $AWS_ERR"
+    tags=$(os::json_tags "$TAG_MANAGED=true" "$TAG_FROM_INSTANCE=$instance" "$TAG_CREATED=$(os::now_iso)")
+    os::info "creating snapshot '$snap' of '$instance'"
+    os::aws_must lightsail create-instance-snapshot --instance-snapshot-name "$snap" --instance-name "$instance" --tags "$tags"
+    os::op_wait "$AWS_OUT"
+    if [[ $DRY_RUN == true ]]; then
+        return 0
+    fi
+    deadline=$((SECONDS + budget))
+    attempts=0
+    max_attempts=$(os::max_attempts "$budget")
+    interval=$POLL_INTERVAL
+    while :; do
+        os::global_deadline_check
+        os::aws_must lightsail get-instance-snapshot --instance-snapshot-name "$snap"
+        state=$(jq -r '.instanceSnapshot.state // empty' <<<"$AWS_OUT")
+        case $state in
+            available) os::info "snapshot '$snap' is available"; return 0 ;;
+            error) os::die "$EX_AWS" "snapshot '$snap' ended in state 'error'" ;;
+        esac
+        attempts=$((attempts + 1))
+        if (( SECONDS >= deadline || attempts >= max_attempts )); then
+            os::die "$EX_TIMEOUT" "snapshot '$snap' not available within ${budget}s (state: ${state:-unknown})"
+        fi
+        os::sleep "$interval"
+        interval=$(os::backoff "$interval")
+    done
+}
+
+# os::ports_apply INSTANCE MODE SPEC... - open | close (one call per spec) or set (one put call).
+os::ports_apply() {
+    local instance=$1 mode=$2
+    shift 2
+    local spec json
+    local -a infos=()
+    for spec in "$@"; do
+        os::parse_port_spec "$spec"
+        infos+=("$PORT_JSON")
+    done
+    (( ${#infos[@]} )) || return 0
+    case $mode in
+        open)
+            for json in "${infos[@]}"; do
+                os::info "opening ports $(jq -r '(.fromPort|tostring) + "-" + (.toPort|tostring) + "/" + .protocol' <<<"$json") on '$instance'"
+                os::aws_must lightsail open-instance-public-ports --instance-name "$instance" --port-info "$json"
+                os::op_wait "$AWS_OUT"
+            done
+            ;;
+        close)
+            for json in "${infos[@]}"; do
+                os::info "closing ports $(jq -r '(.fromPort|tostring) + "-" + (.toPort|tostring) + "/" + .protocol' <<<"$json") on '$instance'"
+                os::aws_must lightsail close-instance-public-ports --instance-name "$instance" --port-info "$json"
+                os::op_wait "$AWS_OUT"
+            done
+            ;;
+        set)
+            json=$(printf '%s\n' "${infos[@]}" | jq -cs '.')
+            os::info "replacing the firewall of '$instance' with ${#infos[@]} rule(s)"
+            os::aws_must lightsail put-instance-public-ports --instance-name "$instance" --port-infos "$json"
+            os::op_wait "$AWS_OUT"
+            ;;
+    esac
+    return 0
+}
+
+# os::region_resolve - --region > OCTOSAIL_REGION > AWS_REGION > AWS_DEFAULT_REGION > aws configure.
+os::region_resolve() {
+    [[ -n $REGION ]] && return 0
+    REGION=${OCTOSAIL_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}
+    if [[ -z $REGION ]] && os::has_cmd "$AWS_BIN"; then
+        if [[ -n $PROFILE ]]; then
+            REGION=$("$AWS_BIN" configure get region --profile "$PROFILE" 2>/dev/null </dev/null) || REGION=""
+        else
+            REGION=$("$AWS_BIN" configure get region 2>/dev/null </dev/null) || REGION=""
+        fi
+    fi
+    [[ -n $REGION ]] || os::die "$EX_AUTH" "no AWS region configured (use --region, OCTOSAIL_REGION, AWS_REGION or 'aws configure')"
+    [[ $REGION =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || os::die "$EX_USAGE" "'$REGION' does not look like an AWS region (e.g. eu-west-1)"
+}
+
+###############################################################################
+# SSH layer
+###############################################################################
+
+os::ssh_reset() {
+    SSH_USER=""
+    SSH_HOST=""
+    SSH_PORT=${OPT_SSH_PORT:-22}
+    SSH_KEY_FILE=""
+    SSH_CERT_FILE=""
+    SSH_KNOWN_HOSTS=""
+    SSH_STRICT="yes"
+    SSH_KEY_SOURCE_USED=""
+    ACCESS_JSON=""
+    ACCESS_EXPIRES=0
+    SSH_READY=false
+}
+
+# os::write_secret_file DEST CONTENT [MODE] - write key material with a private umask.
+os::write_secret_file() {
+    local dest=$1 content=$2 mode=${3:-600}
+    (
+        umask 077
+        printf '%s\n' "$content" >"$dest"
+    ) || os::die "$EX_DEP" "cannot write $dest"
+    chmod "$mode" "$dest"
+}
+
+# os::ssh_access_fetch NAME - get-instance-access-details into ACCESS_JSON (secrets masked immediately).
+os::ssh_access_fetch() {
+    local name=$1 rc=0 field exp
+    os::aws lightsail get-instance-access-details --instance-name "$name" --protocol ssh || rc=$?
+    if (( rc == EX_NOTFOUND )); then
+        os::die "$EX_NOTFOUND" "instance '$name' not found while fetching access details"
+    fi
+    (( rc == 0 )) || os::die "$EX_AWS" "get-instance-access-details $name failed: $AWS_ERR"
+    ACCESS_JSON=$(jq -c '.accessDetails // {}' <<<"$AWS_OUT")
+    for field in privateKey certKey password passwordData; do
+        os::mask "$(jq -r --arg f "$field" '.[$f] // empty' <<<"$ACCESS_JSON")"
+    done
+    exp=$(jq -r '.expiresAt // empty' <<<"$ACCESS_JSON")
+    ACCESS_EXPIRES=$(os::iso_to_epoch "$exp")
+    return 0
+}
+
+# os::ssh_write_lightsail_key - write privateKey / certKey from ACCESS_JSON into the run dir.
+os::ssh_write_lightsail_key() {
+    local pk cert
+    pk=$(jq -r '.privateKey // empty' <<<"$ACCESS_JSON")
+    [[ -n $pk ]] || return 1
+    os::write_secret_file "$RUN_DIR/id_key" "$pk" 600
+    SSH_KEY_FILE="$RUN_DIR/id_key"
+    cert=$(jq -r '.certKey // empty' <<<"$ACCESS_JSON")
+    if [[ -n $cert ]]; then
+        os::write_secret_file "$RUN_DIR/id_key-cert.pub" "$cert" 644
+        SSH_CERT_FILE="$RUN_DIR/id_key-cert.pub"
+    else
+        SSH_CERT_FILE=""
+    fi
+    return 0
+}
+
+# os::ssh_key_from_env DEST - normalise OCTOSAIL_SSH_PRIVATE_KEY (PEM, base64 or \n-escaped) into DEST.
+os::ssh_key_from_env() {
+    local dest=$1 raw=${OCTOSAIL_SSH_PRIVATE_KEY:-} decoded
+    os::mask "$raw"
+    if [[ $raw != *"-----BEGIN"* ]]; then
+        if decoded=$(printf '%s' "$raw" | tr -d '\n\r\t ' | base64 --decode 2>/dev/null) && [[ $decoded == *"-----BEGIN"* ]]; then
+            raw=$decoded
+        else
+            os::die "$EX_USAGE" "OCTOSAIL_SSH_PRIVATE_KEY is neither a PEM/OpenSSH private key nor base64 of one"
+        fi
+    fi
+    if [[ $raw == *'\n'* && $raw != *$'\n'* ]]; then
+        raw=$(printf '%b' "$raw")
+    fi
+    raw=${raw//$'\r'/}
+    os::mask "$raw"
+    os::write_secret_file "$dest" "$raw" 600
+}
+
+# os::ssh_default_key_download NAME DEST - fall back to the regional default key pair.
+os::ssh_default_key_download() {
+    local name=$1 dest=$2 b64 material
+    if [[ $INST_KEY_NAME != "$DEFAULT_KEY_PAIR_PREFIX"* ]]; then
+        os::die "$EX_SSH" "no usable private key: instance '$name' uses key pair '${INST_KEY_NAME:-unknown}'; provide --key-file or OCTOSAIL_SSH_PRIVATE_KEY"
+    fi
+    os::info "Lightsail did not return a temporary key; downloading the regional default key pair"
+    os::aws_must lightsail download-default-key-pair
+    b64=$(jq -r '.privateKeyBase64 // empty' <<<"$AWS_OUT")
+    [[ -n $b64 ]] || os::die "$EX_SSH" "download-default-key-pair returned no private key"
+    material=$(printf '%s' "$b64" | tr -d '\n\r ' | base64 --decode 2>/dev/null) || os::die "$EX_SSH" "default key pair could not be decoded"
+    os::mask "$material"
+    os::write_secret_file "$dest" "$material" 600
+}
+
+# os::ssh_validate_key FILE - the key must be a readable, unencrypted OpenSSH/PEM private key.
+os::ssh_validate_key() {
+    ssh-keygen -y -P '' -f "$1" >/dev/null 2>&1 </dev/null \
+        || os::die "$EX_USAGE" "private key is not a valid, unencrypted OpenSSH/PEM key (source: ${SSH_KEY_SOURCE_USED:-unknown})"
+}
+
+# os::ssh_resolve_key NAME - decide the key source (file > env > lightsail) and write the key file.
+os::ssh_resolve_key() {
+    local name=$1 source=$OPT_SSH_KEY_SOURCE dest="$RUN_DIR/id_key"
+    if [[ $source == auto ]]; then
+        if [[ -n $OPT_SSH_KEY_FILE ]]; then
+            source="file"
+        elif [[ -n ${OCTOSAIL_SSH_PRIVATE_KEY:-} ]]; then
+            source="env"
+        else
+            source="lightsail"
+        fi
+    fi
+    case $source in
+        file)
+            [[ -n $OPT_SSH_KEY_FILE ]] || os::die "$EX_USAGE" "--key-source file requires --key-file or OCTOSAIL_SSH_KEY_FILE"
+            [[ -f $OPT_SSH_KEY_FILE ]] || os::die "$EX_USAGE" "private key file '$OPT_SSH_KEY_FILE' not found"
+            os::write_secret_file "$dest" "$(cat "$OPT_SSH_KEY_FILE")" 600
+            SSH_KEY_FILE=$dest
+            ;;
+        env)
+            [[ -n ${OCTOSAIL_SSH_PRIVATE_KEY:-} ]] || os::die "$EX_USAGE" "--key-source env requires OCTOSAIL_SSH_PRIVATE_KEY"
+            os::ssh_key_from_env "$dest"
+            SSH_KEY_FILE=$dest
+            ;;
+        lightsail)
+            [[ -n $ACCESS_JSON ]] || os::ssh_access_fetch "$name"
+            if ! os::ssh_write_lightsail_key; then
+                os::ssh_default_key_download "$name" "$dest"
+                SSH_KEY_FILE=$dest
+                SSH_CERT_FILE=""
+            fi
+            ;;
+        *) os::die "$EX_USAGE" "--key-source must be auto, file, env or lightsail (got '$source')" ;;
+    esac
+    SSH_KEY_SOURCE_USED=$source
+    os::ssh_validate_key "$SSH_KEY_FILE"
+    os::debug "ssh private key source: $source"
+}
+
+# os::ssh_refresh_access NAME - re-fetch access details when the temporary key is about to expire.
+os::ssh_refresh_access() {
+    local name=$1 now
+    [[ $SSH_KEY_SOURCE_USED == lightsail || $OPT_HOST_KEY_POLICY == lightsail ]] || return 0
+    [[ -n $ACCESS_JSON ]] || return 0
+    (( ACCESS_EXPIRES > 0 )) || return 0
+    now=$(os::now_epoch)
+    if (( now >= ACCESS_EXPIRES - 60 )); then
+        os::info "temporary access credentials are expiring; refreshing"
+        os::ssh_access_fetch "$name"
+        if [[ $SSH_KEY_SOURCE_USED == lightsail ]]; then
+            os::ssh_write_lightsail_key || true
+        fi
+        if [[ $OPT_HOST_KEY_POLICY == lightsail ]]; then
+            os::ssh_known_hosts_lightsail || true
+        fi
+    fi
+}
+
+# os::ssh_resolve_target - user@host:port from overrides, access details and the instance.
+os::ssh_resolve_target() {
+    SSH_USER=$OPT_SSH_USER
+    if [[ -z $SSH_USER && -n $ACCESS_JSON ]]; then
+        SSH_USER=$(jq -r '.username // empty' <<<"$ACCESS_JSON")
+    fi
+    [[ -n $SSH_USER ]] || SSH_USER=$INST_USERNAME
+    [[ -n $SSH_USER ]] || os::die "$EX_SSH" "cannot determine the SSH user for '$INST_NAME'; use --user"
+    SSH_HOST=$OPT_SSH_HOST
+    [[ -n $SSH_HOST ]] || SSH_HOST=$INST_PUBLIC_IP
+    [[ -n $SSH_HOST ]] || os::die "$EX_SSH" "instance '$INST_NAME' has no public IPv4 address; use --host"
+    SSH_PORT=${OPT_SSH_PORT:-22}
+}
+
+# os::ssh_known_hosts_lightsail - pin the host keys Lightsail witnessed. Returns 1 while none are published.
+os::ssh_known_hosts_lightsail() {
+    local file="$RUN_DIR/known_hosts" now entries alg key fp nva exp count=0 hostspec
+    now=$(os::now_epoch)
+    entries=$(jq -r '(.hostKeys // [])[] | select(.publicKey != null and .algorithm != null)
+        | [.algorithm, .publicKey, (.fingerprintSHA256 // ""), (.notValidAfter // "")] | join("\u001f")' <<<"$ACCESS_JSON")
+    : >"$file"
+    chmod 600 "$file"
+    hostspec=$SSH_HOST
+    if (( SSH_PORT != 22 )); then
+        hostspec="[$SSH_HOST]:$SSH_PORT"
+    fi
+    while IFS=$'\x1f' read -r alg key fp nva; do
+        [[ -n $alg && -n $key ]] || continue
+        if [[ -n $nva ]]; then
+            exp=$(os::iso_to_epoch "$nva")
+            if (( exp > 0 && exp < now )); then
+                os::debug "skipping expired host key ${fp:-$alg}"
+                continue
+            fi
+        fi
+        printf '%s %s %s\n' "$hostspec" "$alg" "$key" >>"$file"
+        count=$((count + 1))
+        if [[ -n $fp && -z ${HOST_KEYS_LOGGED[$fp]+x} ]]; then
+            HOST_KEYS_LOGGED[$fp]=1
+            os::info "pinned host key $alg $fp for $SSH_HOST"
+        fi
+    done <<<"$entries"
+    (( count > 0 )) || return 1
+    SSH_KNOWN_HOSTS=$file
+    SSH_STRICT=yes
+    return 0
+}
+
+# os::ssh_known_hosts_static - known_hosts handling for the non-lightsail policies.
+os::ssh_known_hosts_static() {
+    case $OPT_HOST_KEY_POLICY in
+        accept-new)
+            SSH_KNOWN_HOSTS="$RUN_DIR/known_hosts"
+            [[ -f $SSH_KNOWN_HOSTS ]] || { : >"$SSH_KNOWN_HOSTS"; chmod 600 "$SSH_KNOWN_HOSTS"; }
+            SSH_STRICT=accept-new
+            if [[ -z ${HOST_KEYS_LOGGED[accept-new]+x} ]]; then
+                HOST_KEYS_LOGGED[accept-new]=1
+                os::warn "host-key policy accept-new: the first key presented by $SSH_HOST is trusted for this invocation"
+            fi
+            ;;
+        known-hosts)
+            SSH_KNOWN_HOSTS=${OPT_KNOWN_HOSTS_FILE:-$HOME/.ssh/known_hosts}
+            [[ -f $SSH_KNOWN_HOSTS ]] || os::die "$EX_SSH" "known_hosts file '$SSH_KNOWN_HOSTS' not found"
+            SSH_STRICT=yes
+            ;;
+        none)
+            SSH_KNOWN_HOSTS=/dev/null
+            SSH_STRICT=no
+            os::warn "host-key policy none: host keys are NOT verified for $SSH_HOST"
+            ;;
+        lightsail) return 0 ;;
+        *) os::die "$EX_USAGE" "--host-key-policy must be lightsail, accept-new, known-hosts or none (got '$OPT_HOST_KEY_POLICY')" ;;
+    esac
+}
+
+# os::ssh_opts - build SSH_OPTS and SCP_OPTS from the resolved session state.
+os::ssh_opts() {
+    local -a common=(-o BatchMode=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no
+        -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR -o UpdateHostKeys=no
+        -o ControlMaster=no -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" -o "StrictHostKeyChecking=$SSH_STRICT" -i "$SSH_KEY_FILE")
+    if [[ -n $SSH_CERT_FILE ]]; then
+        common+=(-o "CertificateFile=$SSH_CERT_FILE")
+    fi
+    SSH_OPTS=("${common[@]}" -p "$SSH_PORT")
+    SCP_OPTS=("${common[@]}" -P "$SSH_PORT")
+    local extra
+    for extra in "${OPT_SSH_EXTRA_OPTS[@]+"${OPT_SSH_EXTRA_OPTS[@]}"}"; do
+        SSH_OPTS+=(-o "$extra")
+        SCP_OPTS+=(-o "$extra")
+    done
+}
+
+# os::ssh_wait NAME BUDGET FAIL_CODE - prepare keys/host keys and probe until `ssh ... true` succeeds.
+os::ssh_wait() {
+    local name=$1 budget=$2 fail_code=$3
+    local deadline=$((SECONDS + budget)) attempts=0 max_attempts interval=5 rc probe_err errfile="$RUN_DIR/ssh.err"
+    max_attempts=$(os::max_attempts "$budget")
+    if [[ $DRY_RUN == true ]]; then
+        os::info "DRY-RUN: would wait for ssh on instance '$name'"
+        SSH_READY=true
+        return 0
+    fi
+    [[ -n $SSH_KEY_FILE ]] || os::ssh_resolve_key "$name"
+    os::ssh_resolve_target
+    while :; do
+        os::global_deadline_check
+        if [[ $OPT_HOST_KEY_POLICY == lightsail ]]; then
+            [[ -n $ACCESS_JSON ]] || os::ssh_access_fetch "$name"
+            if ! os::ssh_known_hosts_lightsail; then
+                os::debug "Lightsail has not published host keys for '$name' yet"
+                attempts=$((attempts + 1))
+                if (( SECONDS >= deadline || attempts >= max_attempts )); then
+                    os::die "$EX_TIMEOUT" "host keys were never published by Lightsail for '$name' within ${budget}s; use --host-key-policy accept-new for blueprints that do not publish them"
+                fi
+                os::sleep "$interval"
+                interval=$(os::backoff "$interval" 20)
+                ACCESS_JSON=""
+                continue
+            fi
+        else
+            os::ssh_known_hosts_static
+        fi
+        os::ssh_refresh_access "$name"
+        os::ssh_opts
+        rc=0
+        os::with_timeout 30 /dev/null - "$errfile" ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" -- true || rc=$?
+        if (( rc == 0 )); then
+            os::info "ssh is ready on $SSH_USER@$SSH_HOST"
+            SSH_READY=true
+            return 0
+        fi
+        probe_err=$(grep -v '^$' "$errfile" 2>/dev/null | tail -n1 || true)
+        if [[ -n $probe_err && $probe_err =~ $SSH_FATAL_RE ]] || grep -qE "$SSH_FATAL_RE" "$errfile" 2>/dev/null; then
+            os::die "$EX_SSH" "ssh to $SSH_USER@$SSH_HOST failed permanently: ${probe_err:-see above}"
+        fi
+        attempts=$((attempts + 1))
+        if (( SECONDS >= deadline || attempts >= max_attempts )); then
+            os::die "$fail_code" "ssh to $SSH_USER@$SSH_HOST not ready within ${budget}s: ${probe_err:-no response}"
+        fi
+        os::debug "ssh not ready yet (${probe_err:-no response}); retrying"
+        os::sleep "$interval"
+        interval=$(os::backoff "$interval" 20)
+    done
+}
+
+# os::ssh_build_script BODY_FILE OUT_FILE - prelude (strict mode, env, cwd) + the user's script.
+os::ssh_build_script() {
+    local body=$1 out=$2 kv key val
+    {
+        printf '#!/usr/bin/env %s\n' "$OPT_SHELL"
+        if [[ $OPT_STRICT == true ]]; then
+            if [[ $OPT_SHELL == bash ]]; then
+                printf 'set -euo pipefail\n'
+            else
+                printf 'set -eu\n'
+            fi
+        fi
+        for kv in "${OPT_ENV[@]+"${OPT_ENV[@]}"}"; do
+            key=${kv%%=*}
+            val=${kv#*=}
+            printf 'export %s=%s\n' "$key" "$(os::shell_quote "$val")"
+        done
+        if [[ -n $OPT_CWD ]]; then
+            printf 'cd -- %s || exit 2\n' "$(os::shell_quote "$OPT_CWD")"
+        fi
+        cat "$body"
+        printf '\n'
+    } >"$out"
+}
+
+# os::ssh_run_script NAME SCRIPT_FILE TIMEOUT CAPTURE_DIR - execute the script exactly once. Returns its status (124 = timeout).
+os::ssh_run_script() {
+    local name=$1 script=$2 limit=$3 capture=$4 rc=0
+    local -a remote=("$OPT_SHELL" -s)
+    if [[ $OPT_SUDO == true ]]; then
+        remote=(sudo -n -H -- "${remote[@]}")
+    fi
+    os::ssh_refresh_access "$name"
+    os::ssh_opts
+    if [[ $DRY_RUN == true ]]; then
+        os::info "DRY-RUN: ssh $SSH_USER@$SSH_HOST -- ${remote[*]} < $script"
+        return 0
+    fi
+    os::debug "ssh: $(os::redact_argv ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" -- "${remote[@]}")"
+    if [[ -n $capture ]]; then
+        mkdir -p "$capture"
+        local out="$capture/stdout.log" err="$capture/stderr.log" fifo_out="$RUN_DIR/out.fifo" fifo_err="$RUN_DIR/err.fifo" tee_out tee_err
+        rm -f "$fifo_out" "$fifo_err"
+        mkfifo "$fifo_out" "$fifo_err"
+        if [[ $JSON_MODE == true ]]; then
+            tee "$out" <"$fifo_out" >/dev/null &
+        else
+            tee "$out" <"$fifo_out" &
+        fi
+        tee_out=$!
+        tee "$err" <"$fifo_err" >&2 &
+        tee_err=$!
+        os::with_timeout "$limit" "$script" "$fifo_out" "$fifo_err" ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" -- "${remote[@]}" || rc=$?
+        wait "$tee_out" "$tee_err" 2>/dev/null || true
+        rm -f "$fifo_out" "$fifo_err"
+    else
+        os::with_timeout "$limit" "$script" - - ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" -- "${remote[@]}" || rc=$?
+    fi
+    return "$rc"
+}
+
+BOOT_ID=""
+
+# os::ssh_boot_id NAME - BOOT_ID = the remote boot id (empty on failure).
+os::ssh_boot_id() {
+    local name=$1 rc=0 file="$RUN_DIR/boot_id"
+    BOOT_ID=""
+    os::ssh_refresh_access "$name"
+    os::ssh_opts
+    os::with_timeout 30 /dev/null "$file" /dev/null ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" -- cat /proc/sys/kernel/random/boot_id || rc=$?
+    if (( rc == 0 )) && [[ -f $file ]]; then
+        BOOT_ID=$(tr -d '[:space:]' <"$file")
+    fi
+    rm -f "$file"
+}
+
+# os::cloud_init_wait NAME BUDGET - run the remote cloud-init wait; sets CLOUD_INIT_STATUS. Returns 0, EX_CLOUDINIT or EX_TIMEOUT.
+os::cloud_init_wait() {
+    local name=$1 budget=$2 rc=0 script="$RUN_DIR/cloud-init.sh" outfile="$RUN_DIR/cloud-init.out" status
+    cat >"$script" <<EOF
+budget=$budget
+if command -v cloud-init >/dev/null 2>&1; then
+    s=""
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then s="sudo -n"; fi
+    t=""
+    if command -v timeout >/dev/null 2>&1; then t="timeout \$budget"; fi
+    \$t \$s cloud-init status --wait >/dev/null 2>&1
+    rc=\$?
+    if [ "\$rc" -eq 124 ]; then echo "$CLOUD_INIT_MARKER timeout"; exit 0; fi
+    st=\$(\$s cloud-init status 2>/dev/null | sed -n 's/^status:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')
+    case "\$st" in
+        done|error|degraded) echo "$CLOUD_INIT_MARKER \$st" ;;
+        running|"") if [ "\$rc" -eq 0 ]; then echo "$CLOUD_INIT_MARKER done"; elif [ "\$rc" -eq 2 ]; then echo "$CLOUD_INIT_MARKER degraded"; elif [ "\$rc" -eq 1 ]; then echo "$CLOUD_INIT_MARKER error"; else echo "$CLOUD_INIT_MARKER unknown"; fi ;;
+        *) echo "$CLOUD_INIT_MARKER unknown" ;;
+    esac
+elif [ -d /var/lib/cloud ]; then
+    waited=0
+    while [ ! -f /var/lib/cloud/instance/boot-finished ]; do
+        if [ "\$waited" -ge "\$budget" ]; then echo "$CLOUD_INIT_MARKER timeout"; exit 0; fi
+        sleep 5
+        waited=\$((waited + 5))
+    done
+    echo "$CLOUD_INIT_MARKER done"
+else
+    echo "$CLOUD_INIT_MARKER absent"
+fi
+EOF
+    if [[ $DRY_RUN == true ]]; then
+        CLOUD_INIT_STATUS="skipped"
+        return 0
+    fi
+    os::info "waiting for cloud-init on $SSH_USER@$SSH_HOST (up to ${budget}s)"
+    os::ssh_refresh_access "$name"
+    os::ssh_opts
+    os::with_timeout $((budget + 60)) "$script" "$outfile" - ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" -- sh -s || rc=$?
+    if (( rc == 124 )); then
+        CLOUD_INIT_STATUS="timeout"
+        return "$EX_TIMEOUT"
+    fi
+    status=$(grep "^$CLOUD_INIT_MARKER" "$outfile" 2>/dev/null | tail -n1 | awk '{print $2}')
+    if (( rc != 0 )) && [[ -z $status ]]; then
+        CLOUD_INIT_STATUS="unknown"
+        os::warn "cloud-init status could not be determined (ssh exit $rc)"
+        return 0
+    fi
+    CLOUD_INIT_STATUS=${status:-unknown}
+    case $CLOUD_INIT_STATUS in
+        done|absent) os::info "cloud-init: $CLOUD_INIT_STATUS"; return 0 ;;
+        unknown) os::warn "cloud-init: status unknown"; return 0 ;;
+        degraded)
+            if [[ $OPT_CLOUD_INIT_STRICT == true ]]; then
+                return "$EX_CLOUDINIT"
+            fi
+            os::warn "cloud-init finished in a degraded state (some modules reported errors)"
+            return 0
+            ;;
+        error) return "$EX_CLOUDINIT" ;;
+        timeout) return "$EX_TIMEOUT" ;;
+        *) os::warn "cloud-init: unexpected status '$CLOUD_INIT_STATUS'"; return 0 ;;
+    esac
+}
+
+# os::scp NAME [-r] SRC... DEST - copy with the session's options; remote paths must already be user@host:path.
+os::scp() {
+    local name=$1 rc=0
+    shift
+    os::ssh_refresh_access "$name"
+    os::ssh_opts
+    if [[ $DRY_RUN == true ]]; then
+        os::info "DRY-RUN: scp $*"
+        return 0
+    fi
+    os::debug "scp: $(os::redact_argv scp "${SCP_OPTS[@]}" "$@")"
+    os::with_timeout 0 /dev/null - - scp "${SCP_OPTS[@]}" "$@" || rc=$?
+    return "$rc"
+}
+
+# os::remote_path PATH - user@host:PATH for scp.
+os::remote_path() {
+    printf '%s@%s:%s' "$SSH_USER" "$SSH_HOST" "$1"
+}
+
+# os::transfer NAME MODE SPEC - upload "LOCAL:REMOTE" or download "REMOTE:LOCAL" (SPEC split at the first colon).
+os::transfer() {
+    local name=$1 mode=$2 spec=$3 src dest rc=0
+    local -a flags=()
+    [[ $spec == *:* ]] || os::die "$EX_USAGE" "$mode spec '$spec' must be SRC:DEST"
+    src=${spec%%:*}
+    dest=${spec#*:}
+    [[ -n $src && -n $dest ]] || os::die "$EX_USAGE" "$mode spec '$spec' must be SRC:DEST with both sides set"
+    if [[ $OPT_COPY_RECURSIVE == true ]]; then
+        flags+=(-r)
+    fi
+    case $mode in
+        upload)
+            [[ -e $src ]] || os::die "$EX_USAGE" "upload source '$src' does not exist"
+            os::info "uploading $src -> $SSH_HOST:$dest"
+            os::scp "$name" "${flags[@]+"${flags[@]}"}" "$src" "$(os::remote_path "$dest")" || rc=$?
+            ;;
+        download)
+            mkdir -p "$(dirname -- "$dest")" 2>/dev/null || true
+            os::info "downloading $SSH_HOST:$src -> $dest"
+            os::scp "$name" "${flags[@]+"${flags[@]}"}" "$(os::remote_path "$src")" "$dest" || rc=$?
+            ;;
+    esac
+    return "$rc"
+}
+
+###############################################################################
+# Lifecycle: delete guard, delete flow, cleanup, traps
+###############################################################################
+
+# os::delete_guard NAME - refuse to delete protected or unmanaged instances (unless --yes).
+os::delete_guard() {
+    local name=$1
+    if os::instance_is_protected; then
+        os::die "$EX_REFUSED" "instance '$name' is tagged $TAG_PROTECTED=true; refusing to delete it (remove the tag first)"
+    fi
+    if os::instance_is_managed; then
+        return 0
+    fi
+    if [[ $ASSUME_YES == true ]]; then
+        os::warn "instance '$name' is not managed by octosail; deleting it because --yes was given"
+        return 0
+    fi
+    os::die "$EX_REFUSED" "instance '$name' is not managed by octosail (no $TAG_MANAGED=true tag); re-run with --yes, or tag the instance $TAG_MANAGED=true"
+}
+
+# os::delete_flow NAME - the complete, guarded, idempotent decommission of one instance.
+# Uses OPT_WAIT, OPT_IF_MISSING, OPT_SNAPSHOT_FIRST, OPT_RELEASE_STATIC_IP, OPT_DELETE_KEY_PAIR,
+# OPT_FORCE_DELETE_ADD_ONS, OPT_DELETE_TIMEOUT, OPT_SNAPSHOT_TIMEOUT. Terminates on failure.
+os::delete_flow() {
+    local name=$1 rc=0 snap="" ipname="" kp="" rc2=0
+    local -a args=()
+    os::out_declare name deleted snapshot_name static_ip_released key_pair_deleted dry_run
+    os::out name "$name"
+    os::out dry_run "$DRY_RUN"
+    os::instance_get "$name" || rc=$?
+    if (( rc == EX_NOTFOUND )); then
+        if [[ $OPT_IF_MISSING == fail ]]; then
+            os::die "$EX_NOTFOUND" "instance '$name' does not exist"
+        fi
+        os::info "instance '$name' does not exist; nothing to delete"
+        os::out deleted false
+        return 0
+    fi
+    os::delete_guard "$name"
+    if [[ -n $OPT_SNAPSHOT_FIRST ]]; then
+        if [[ $OPT_SNAPSHOT_FIRST == true ]]; then
+            snap="${name}-$(date -u +%Y%m%d%H%M%S)"
+        else
+            snap=$OPT_SNAPSHOT_FIRST
+        fi
+        os::validate_name "$snap" "snapshot name"
+        os::snapshot_create "$name" "$snap" "$OPT_SNAPSHOT_TIMEOUT"
+        os::out snapshot_name "$snap"
+    fi
+    if [[ $INST_IS_STATIC == true ]]; then
+        ipname=$(os::instance_tag "$TAG_STATIC_IP")
+        if [[ -n $ipname || $OPT_RELEASE_STATIC_IP == true ]]; then
+            if [[ -z $ipname ]]; then
+                os::static_ip_find_attached "$name"
+                ipname=$STATIC_IP_FOUND
+            fi
+            if [[ -n $ipname ]]; then
+                os::static_ip_release "$ipname"
+                os::out static_ip_released true
+            else
+                os::warn "instance '$name' has a static IP but its name could not be determined; not released"
+            fi
+        else
+            os::info "instance '$name' has a static IP that octosail did not allocate; keeping it (use --release-static-ip)"
+        fi
+    fi
+    if [[ $OPT_FORCE_DELETE_ADD_ONS == true ]]; then
+        args+=(--force-delete-add-ons)
+    fi
+    os::info "deleting instance '$name'"
+    os::aws lightsail delete-instance --instance-name "$name" "${args[@]+"${args[@]}"}" || rc2=$?
+    if (( rc2 == EX_NOTFOUND )); then
+        os::info "instance '$name' vanished before the delete call"
+        os::out deleted false
+        return 0
+    fi
+    (( rc2 == 0 )) || os::die "$EX_AWS" "delete-instance $name failed: $AWS_ERR"
+    os::op_wait "$AWS_OUT"
+    if [[ $OPT_WAIT == true ]]; then
+        os::absent_wait "$name" "$OPT_DELETE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$name' still exists after ${OPT_DELETE_TIMEOUT}s"
+        os::info "instance '$name' has been deleted"
+    fi
+    kp=$(os::instance_tag "$TAG_KEY_PAIR")
+    if [[ -z $kp && $OPT_DELETE_KEY_PAIR == true && -n $INST_KEY_NAME && $INST_KEY_NAME != "$DEFAULT_KEY_PAIR_PREFIX"* ]]; then
+        kp=$INST_KEY_NAME
+    fi
+    if [[ -n $kp ]]; then
+        rc2=0
+        os::info "deleting key pair '$kp'"
+        os::aws lightsail delete-key-pair --key-pair-name "$kp" || rc2=$?
+        if (( rc2 == 0 )); then
+            os::op_wait "$AWS_OUT"
+            os::out key_pair_deleted true
+        elif (( rc2 == EX_NOTFOUND )); then
+            os::info "key pair '$kp' no longer exists"
+        else
+            os::warn "could not delete key pair '$kp': $AWS_ERR"
+        fi
+    fi
+    os::out deleted true
+    return 0
+}
+
+# os::cleanup_run - the delete phase of `run` (also executed from the EXIT trap after a failure or signal).
+os::cleanup_run() {
+    [[ $CLEANUP_DONE == true ]] && return 0
+    CLEANUP_DONE=true
+    local name=$CLEANUP_INSTANCE pending=${EXIT_CODE:-0} rc=0 wait_flag=$OPT_CLEANUP_WAIT
+    [[ -n $name ]] || return 0
+    os::out_declare deleted leaked_instance cleanup_error
+    if [[ $RUN_CREATED != true && $CLEANUP_INSTANCE_EXISTS != true ]]; then
+        os::out deleted false
+        return 0
+    fi
+    case $OPT_DELETE_POLICY in
+        never)
+            os::notice "instance '$name' kept (--delete-policy never)"
+            os::out deleted skipped
+            return 0
+            ;;
+        created)
+            if [[ $RUN_CREATED != true ]]; then
+                os::notice "instance '$name' was reused, not created; kept (--delete-policy created)"
+                os::out deleted skipped
+                return 0
+            fi
+            ;;
+        always) ;;
+    esac
+    if [[ $OPT_KEEP_ON_FAILURE == true && $pending -ne 0 ]]; then
+        os::warn "instance '$name' kept for inspection (--keep-on-failure); public IP: ${INST_PUBLIC_IP:-unknown}"
+        os::out deleted skipped
+        return 0
+    fi
+    os::group "delete $name"
+    (
+        OPT_WAIT=$wait_flag
+        OPT_IF_MISSING=ok
+        os::delete_flow "$name"
+    ) || rc=$?
+    os::endgroup
+    if (( rc == 0 )); then
+        os::out deleted true
+        return 0
+    fi
+    os::out deleted false
+    os::out leaked_instance "$name"
+    os::out cleanup_error "delete failed with exit $rc ($(os::exit_name "$rc"))"
+    os::error "cleanup failed: instance '$name' may still exist (delete it with: octosail delete $name)"
+    if (( pending == 0 )); then
+        EXIT_CODE=$EX_CLEANUP
+    fi
+    return "$rc"
+}
+
+# os::on_exit - runs once for every termination path.
+os::on_exit() {
+    local rc=$?
+    trap - EXIT ERR INT TERM
+    set +e
+    [[ -n $EXIT_CODE ]] || EXIT_CODE=$rc
+    if [[ -n $RUN_PHASE && $EXIT_CODE -ne 0 && -z ${OUT[phase_failed]:-} ]]; then
+        os::out phase_failed "$RUN_PHASE"
+    fi
+    if [[ -n $CLEANUP_INSTANCE && $CLEANUP_DONE != true ]]; then
+        os::cleanup_run
+    fi
+    os::out exit_code "$EXIT_CODE"
+    os::out exit_name "$(os::exit_name "$EXIT_CODE")"
+    os::out octosail_version "$_VERSION"
+    os::out_flush
+    os::summary
+    os::json_result "$EXIT_CODE"
+    os::rundir_cleanup
+    exit "$EXIT_CODE"
+}
+
+# os::on_signal NAME - SIGINT/SIGTERM: stop the child, run a non-waiting cleanup, exit 130/143.
+os::on_signal() {
+    local sig=$1 code
+    case $sig in
+        INT) code=130 ;;
+        TERM) code=143 ;;
+        *) code=1 ;;
+    esac
+    trap - INT TERM
+    os::warn "received SIG$sig; stopping"
+    if [[ -n $CHILD_PID ]]; then
+        kill -TERM "$CHILD_PID" 2>/dev/null || true
+    fi
+    OPT_CLEANUP_WAIT=false
+    EXIT_CODE=$code
+    exit "$code"
+}
+
+# os::on_err LINE STATUS - unexpected failure of an unguarded command.
+os::on_err() {
+    local line=$1 status=$2
+    [[ -n $EXIT_CODE ]] || EXIT_CODE=$EX_GENERAL
+    os::error "internal error: command failed with status $status at line $line"
+}
+
+CLEANUP_INSTANCE_EXISTS=false
+
+# os::install_traps
+os::install_traps() {
+    trap 'os::on_exit' EXIT
+    trap 'os::on_signal INT' INT
+    trap 'os::on_signal TERM' TERM
+    trap 'os::on_err "$LINENO" "$?"' ERR
+}
+
+###############################################################################
+# Shared command helpers
+###############################################################################
+
+# os::kv LABEL VALUE - one row of the human-readable table on stdout.
+os::kv() {
+    [[ $JSON_MODE == true ]] && return 0
+    printf '%-18s %s\n' "$1" "${2:-}"
+}
+
+# os::instance_outputs - outputs shared by create/status/run from INST_*.
+os::instance_outputs() {
+    os::out name "$INST_NAME"
+    os::out state "$INST_STATE"
+    os::out public_ip "$INST_PUBLIC_IP"
+    os::out private_ip "$INST_PRIVATE_IP"
+    os::out ipv6_addresses "$INST_IPV6"
+    os::out username "$INST_USERNAME"
+    os::out region "${INST_REGION:-$REGION}"
+    os::out availability_zone "$INST_AZ"
+    os::out blueprint_id "$INST_BLUEPRINT"
+    os::out bundle_id "$INST_BUNDLE"
+    os::out arn "$INST_ARN"
+    os::out key_pair_name "$INST_KEY_NAME"
+    os::out static_ip_name "$(os::instance_tag "$TAG_STATIC_IP")"
+    os::out expires_at "$(os::instance_tag "$TAG_EXPIRES")"
+    JSON_INSTANCE=$INST_JSON
+}
+
+# os::instance_table - human summary of INST_*.
+os::instance_table() {
+    os::kv "name" "$INST_NAME"
+    os::kv "state" "$INST_STATE"
+    os::kv "public ip" "$INST_PUBLIC_IP"
+    os::kv "private ip" "$INST_PRIVATE_IP"
+    [[ -n $INST_IPV6 ]] && os::kv "ipv6" "$INST_IPV6"
+    os::kv "username" "$INST_USERNAME"
+    os::kv "blueprint" "$INST_BLUEPRINT"
+    os::kv "bundle" "$INST_BUNDLE"
+    os::kv "zone" "$INST_AZ"
+    os::kv "key pair" "$INST_KEY_NAME"
+    os::kv "static ip" "$(os::instance_tag "$TAG_STATIC_IP")"
+    os::kv "managed" "$(os::instance_tag "$TAG_MANAGED")"
+    os::kv "protected" "$(os::instance_tag "$TAG_PROTECTED")"
+    os::kv "expires at" "$(os::instance_tag "$TAG_EXPIRES")"
+    os::kv "created at" "$INST_CREATED_AT"
+    return 0
+}
+
+# os::resolve_name - OPT_NAME from flag/positional/env, then the Actions default.
+os::resolve_name() {
+    if [[ -z $OPT_NAME ]]; then
+        OPT_NAME=$(os::default_name)
+    fi
+    os::validate_name "$OPT_NAME"
+}
+
+# os::user_data_load - USER_DATA from --user-data / --user-data-file (- = stdin).
+USER_DATA=""
+os::user_data_load() {
+    USER_DATA=""
+    OPT_USER_DATA_GIVEN=false
+    if [[ -n $OPT_USER_DATA && -n $OPT_USER_DATA_FILE ]]; then
+        os::die "$EX_USAGE" "--user-data and --user-data-file are mutually exclusive"
+    fi
+    if [[ -n $OPT_USER_DATA ]]; then
+        USER_DATA=$OPT_USER_DATA
+        OPT_USER_DATA_GIVEN=true
+    elif [[ -n $OPT_USER_DATA_FILE ]]; then
+        if [[ $OPT_USER_DATA_FILE == - ]]; then
+            USER_DATA=$(cat) || os::die "$EX_USAGE" "cannot read user data from stdin"
+        else
+            [[ -r $OPT_USER_DATA_FILE ]] || os::die "$EX_USAGE" "user data file '$OPT_USER_DATA_FILE' is not readable"
+            USER_DATA=$(cat "$OPT_USER_DATA_FILE")
+        fi
+        OPT_USER_DATA_GIVEN=true
+    fi
+}
+
+# os::script_load OUT_FILE - the exec script body from --script-file / -- words / OCTOSAIL_SCRIPT / stdin.
+os::script_load() {
+    local out=$1 sources=0
+    [[ -n $OPT_SCRIPT_FILE ]] && sources=$((sources + 1))
+    (( ${#REST_ARGS[@]} )) && sources=$((sources + 1))
+    if (( sources > 1 )); then
+        os::die "$EX_USAGE" "give the script either with --script-file or after '--', not both"
+    fi
+    if (( ${#REST_ARGS[@]} )); then
+        printf '%s\n' "${REST_ARGS[*]}" >"$out"
+        OPT_SCRIPT_SOURCE="arguments"
+    elif [[ -n $OPT_SCRIPT_FILE ]]; then
+        if [[ $OPT_SCRIPT_FILE == - ]]; then
+            cat >"$out" || os::die "$EX_USAGE" "cannot read the script from stdin"
+            OPT_SCRIPT_SOURCE="stdin"
+        else
+            [[ -r $OPT_SCRIPT_FILE ]] || os::die "$EX_USAGE" "script file '$OPT_SCRIPT_FILE' is not readable"
+            cat "$OPT_SCRIPT_FILE" >"$out"
+            OPT_SCRIPT_SOURCE="file:$OPT_SCRIPT_FILE"
+        fi
+    elif [[ -n $OPT_SCRIPT ]]; then
+        printf '%s\n' "$OPT_SCRIPT" >"$out"
+        OPT_SCRIPT_SOURCE="OCTOSAIL_SCRIPT"
+    elif [[ ! -t 0 ]] && [[ $OPT_SCRIPT_SOURCE != none ]]; then
+        cat >"$out" || true
+        OPT_SCRIPT_SOURCE="stdin"
+    else
+        : >"$out"
+    fi
+    if [[ ! -s $out || -z $(tr -d '[:space:]' <"$out") ]]; then
+        os::die "$EX_USAGE" "no script or command given (use -- COMMAND, --script-file FILE, OCTOSAIL_SCRIPT or stdin)"
+    fi
+}
+
+# os::capture_dir NAME - where exec output is captured (empty = no capture).
+os::capture_dir() {
+    local name=$1 want=$OPT_CAPTURE
+    if [[ -z $want ]]; then
+        if [[ $IN_ACTIONS == true && -n $OUTPUT_FILE ]] || [[ $JSON_MODE == true ]]; then
+            want=true
+        else
+            want=false
+        fi
+    fi
+    if [[ $JSON_MODE == true ]]; then
+        want=true
+    fi
+    [[ $want == true ]] || { printf ''; return 0; }
+    if [[ -n $OPT_CAPTURE_DIR ]]; then
+        printf '%s/%s' "$OPT_CAPTURE_DIR" "$name"
+    elif [[ -n ${RUNNER_TEMP:-} ]]; then
+        printf '%s/octosail/%s' "$RUNNER_TEMP" "$name"
+    else
+        printf '%s/capture/%s' "$RUN_DIR" "$name"
+    fi
+}
+
+# os::ensure_running NAME - the instance must be running (or be started with --start-if-stopped).
+os::ensure_running() {
+    local name=$1 rc=0
+    os::instance_get "$name" || rc=$?
+    (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "instance '$name' does not exist"
+    case $INST_STATE in
+        running) return 0 ;;
+        stopped)
+            if [[ $OPT_START_IF_STOPPED == true ]]; then
+                os::info "instance '$name' is stopped; starting it"
+                os::aws_must lightsail start-instance --instance-name "$name"
+                os::op_wait "$AWS_OUT"
+                os::state_wait "$name" running "$OPT_STATE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$name' did not reach 'running' within ${OPT_STATE_TIMEOUT}s"
+                os::instance_get "$name" || true
+                return 0
+            fi
+            os::die "$EX_STATE" "instance '$name' is stopped (use --start-if-stopped or 'octosail start $name')"
+            ;;
+        pending|starting|rebooting)
+            os::info "instance '$name' is $INST_STATE; waiting for running"
+            os::state_wait "$name" running "$OPT_STATE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$name' did not reach 'running' within ${OPT_STATE_TIMEOUT}s"
+            os::instance_get "$name" || true
+            return 0
+            ;;
+        *) os::die "$EX_STATE" "instance '$name' is in state '$INST_STATE'; it must be running" ;;
+    esac
+}
+
+###############################################################################
+# create
+###############################################################################
+
+# os::create_flow NAME - create or reuse an instance; wait; ports; static IP; ssh; cloud-init.
+os::create_flow() {
+    local name=$1 rc=0 expires="" tag tags_json ipname kp_tags='[]' op
+    local -a args=() user_tags=()
+    CREATE_CREATED=false
+    CREATE_REUSED=false
+    os::out_declare name created reused state public_ip private_ip ipv6_addresses username region availability_zone \
+        blueprint_id bundle_id arn key_pair_name static_ip_name expires_at ssh_ready cloud_init_status
+    os::out name "$name"
+    [[ -n $OPT_AZ ]] || OPT_AZ="${REGION}a"
+    [[ $OPT_AZ == "$REGION"* ]] || os::die "$EX_USAGE" "availability zone '$OPT_AZ' is not in region '$REGION'"
+    if [[ -n $OPT_STATIC_IP_NAME && $OPT_STATIC_IP == true ]]; then
+        os::die "$EX_USAGE" "--static-ip and --static-ip-name are mutually exclusive"
+    fi
+    os::user_data_load
+    for tag in "${OPT_OPEN_PORTS[@]+"${OPT_OPEN_PORTS[@]}"}"; do
+        os::parse_port_spec "$tag"
+    done
+    for tag in "${OPT_TAGS[@]+"${OPT_TAGS[@]}"}"; do
+        [[ $tag == *=* ]] || os::die "$EX_USAGE" "tag '$tag' must be KEY=VALUE"
+        [[ $tag != "$TAG_PREFIX"* ]] || os::die "$EX_USAGE" "tag '$tag' uses the reserved '$TAG_PREFIX' prefix"
+        user_tags+=("$tag")
+    done
+    if [[ -n $OPT_TTL ]]; then
+        os::to_seconds "$OPT_TTL" "--ttl"
+        expires=$(os::epoch_to_iso $(( $(os::now_epoch) + SECS )))
+    fi
+    os::instance_get "$name" || rc=$?
+    if (( rc == 0 )); then
+        case $OPT_IF_EXISTS in
+            fail) os::die "$EX_CONFLICT" "instance '$name' already exists (--if-exists fail)" ;;
+            replace)
+                os::info "instance '$name' exists; replacing it"
+                rc=0
+                (
+                    OPT_WAIT=true
+                    OPT_IF_MISSING=ok
+                    os::delete_flow "$name"
+                ) || rc=$?
+                (( rc == 0 )) || os::die "$EX_CLEANUP" "could not delete the existing instance '$name' (exit $rc)"
+                rc=$EX_NOTFOUND
+                ;;
+            reuse)
+                CREATE_REUSED=true
+                CLEANUP_INSTANCE_EXISTS=true
+                os::info "reusing existing instance '$name' (state: $INST_STATE)"
+                if [[ -n $OPT_BLUEPRINT && $INST_BLUEPRINT != "$OPT_BLUEPRINT" ]]; then
+                    os::warn "existing instance uses blueprint '$INST_BLUEPRINT', not '$OPT_BLUEPRINT'"
+                fi
+                if [[ -n $OPT_BUNDLE && $INST_BUNDLE != "$OPT_BUNDLE" ]]; then
+                    os::warn "existing instance uses bundle '$INST_BUNDLE', not '$OPT_BUNDLE'"
+                fi
+                case $INST_STATE in
+                    stopped)
+                        os::info "starting stopped instance '$name'"
+                        os::aws_must lightsail start-instance --instance-name "$name"
+                        os::op_wait "$AWS_OUT"
+                        ;;
+                    shutting-down)
+                        os::info "instance '$name' is shutting down; waiting for it to disappear before creating a new one"
+                        os::absent_wait "$name" "$OPT_DELETE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$name' still shutting down after ${OPT_DELETE_TIMEOUT}s"
+                        CREATE_REUSED=false
+                        CLEANUP_INSTANCE_EXISTS=false
+                        rc=$EX_NOTFOUND
+                        ;;
+                    terminated) os::die "$EX_STATE" "instance '$name' is terminated" ;;
+                esac
+                ;;
+            *) os::die "$EX_USAGE" "--if-exists must be reuse, fail or replace (got '$OPT_IF_EXISTS')" ;;
+        esac
+    fi
+    if (( rc == EX_NOTFOUND )); then
+        if [[ -n $OPT_PUBLIC_KEY_FILE ]]; then
+            os::key_pair_ensure "$OPT_PUBLIC_KEY_FILE" "$OPT_KEY_PAIR"
+            OPT_KEY_PAIR=$KEY_PAIR_NAME
+            if [[ -n $KEY_PAIR_IMPORTED_NAME ]]; then
+                kp_tags=$(os::json_tags "$TAG_KEY_PAIR=$KEY_PAIR_IMPORTED_NAME")
+            fi
+        elif [[ -n $OPT_KEY_PAIR ]]; then
+            rc=0
+            os::aws lightsail get-key-pair --key-pair-name "$OPT_KEY_PAIR" || rc=$?
+            (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "key pair '$OPT_KEY_PAIR' does not exist in $REGION (use --public-key-file to import one)"
+            (( rc == 0 )) || os::die "$EX_AWS" "get-key-pair $OPT_KEY_PAIR failed: $AWS_ERR"
+        fi
+        local -a base_tags=("$TAG_MANAGED=true" "$TAG_VERSION=$_VERSION" "$TAG_CREATED=$(os::now_iso)")
+        [[ -n $expires ]] && base_tags+=("$TAG_EXPIRES=$expires")
+        if [[ $IN_ACTIONS == true ]]; then
+            [[ -n ${GITHUB_RUN_ID:-} ]] && base_tags+=("$TAG_RUN_ID=$GITHUB_RUN_ID")
+            [[ -n ${GITHUB_REPOSITORY:-} ]] && base_tags+=("$TAG_REPO=$GITHUB_REPOSITORY")
+        fi
+        [[ $OPT_STATIC_IP == true ]] && base_tags+=("$TAG_STATIC_IP=octosail-$name")
+        tags_json=$(jq -cn --argjson a "$(os::json_tags "${base_tags[@]}")" --argjson b "$(os::json_tags "${user_tags[@]+"${user_tags[@]}"}")" --argjson c "$kp_tags" '$a + $b + $c')
+        args=(--instance-names "$(jq -cn --arg n "$name" '[$n]')" --availability-zone "$OPT_AZ" --bundle-id "$OPT_BUNDLE" --tags "$tags_json")
+        [[ -n $USER_DATA ]] && args+=(--user-data "$USER_DATA")
+        [[ -n $OPT_KEY_PAIR ]] && args+=(--key-pair-name "$OPT_KEY_PAIR")
+        [[ -n $OPT_IP_ADDRESS_TYPE ]] && args+=(--ip-address-type "$OPT_IP_ADDRESS_TYPE")
+        if [[ -n $OPT_FROM_SNAPSHOT ]]; then
+            rc=0
+            os::aws lightsail get-instance-snapshot --instance-snapshot-name "$OPT_FROM_SNAPSHOT" || rc=$?
+            (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "snapshot '$OPT_FROM_SNAPSHOT' does not exist"
+            (( rc == 0 )) || os::die "$EX_AWS" "get-instance-snapshot failed: $AWS_ERR"
+            if [[ $(jq -r '.instanceSnapshot.state // empty' <<<"$AWS_OUT") != available ]]; then
+                os::die "$EX_STATE" "snapshot '$OPT_FROM_SNAPSHOT' is not available yet"
+            fi
+            [[ -n $OPT_BLUEPRINT && $OPT_BLUEPRINT != "$DEFAULT_BLUEPRINT" ]] && os::warn "--blueprint is ignored with --from-snapshot"
+            op=create-instances-from-snapshot
+            args+=(--instance-snapshot-name "$OPT_FROM_SNAPSHOT")
+            os::info "creating instance '$name' from snapshot '$OPT_FROM_SNAPSHOT' ($OPT_BUNDLE in $OPT_AZ)"
+        else
+            op=create-instances
+            args+=(--blueprint-id "$OPT_BLUEPRINT")
+            os::info "creating instance '$name' ($OPT_BLUEPRINT, $OPT_BUNDLE in $OPT_AZ)"
+        fi
+        rc=0
+        os::aws lightsail "$op" "${args[@]}" || rc=$?
+        (( rc == 0 )) || os::die "$EX_AWS" "$op failed: $AWS_ERR"
+        CREATE_CREATED=true
+        RUN_CREATED=true
+        CLEANUP_INSTANCE_EXISTS=true
+        os::op_wait "$AWS_OUT"
+    fi
+    os::out created "$CREATE_CREATED"
+    os::out reused "$CREATE_REUSED"
+    if [[ $OPT_WAIT == true || $OPT_WAIT_SSH == true ]]; then
+        os::state_wait "$name" running "$OPT_CREATE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$name' did not reach 'running' within ${OPT_CREATE_TIMEOUT}s"
+    fi
+    if (( ${#OPT_OPEN_PORTS[@]} )); then
+        os::ports_apply "$name" open "${OPT_OPEN_PORTS[@]}"
+    fi
+    if [[ $OPT_STATIC_IP == true ]]; then
+        ipname="octosail-$name"
+        os::static_ip_ensure "$name" "$ipname"
+        if [[ $CREATE_REUSED == true ]]; then
+            os::instance_tags_set "$name" "$(os::json_tags "$TAG_STATIC_IP=$ipname")"
+        fi
+    elif [[ -n $OPT_STATIC_IP_NAME ]]; then
+        os::static_ip_ensure "$name" "$OPT_STATIC_IP_NAME"
+    fi
+    if [[ $DRY_RUN != true ]]; then
+        os::instance_get "$name" || os::die "$EX_NOTFOUND" "instance '$name' disappeared"
+    else
+        INST_NAME=$name
+        INST_STATE=${INST_STATE:-running}
+        INST_AZ=$OPT_AZ
+        INST_BLUEPRINT=$OPT_BLUEPRINT
+        INST_BUNDLE=$OPT_BUNDLE
+    fi
+    if [[ $INST_STATE == running && -n $INST_PUBLIC_IP ]]; then
+        os::notice "instance '$name' is running at $INST_PUBLIC_IP"
+    fi
+    os::instance_outputs
+    if [[ $OPT_WAIT_SSH == true && $INST_STATE == running ]]; then
+        os::ssh_wait "$name" "$OPT_SSH_TIMEOUT" "$EX_TIMEOUT"
+        os::out ssh_ready true
+        local ci=$OPT_CLOUD_INIT_WAIT
+        if [[ $ci == auto ]]; then
+            if [[ $OPT_USER_DATA_GIVEN == true ]]; then
+                ci=true
+            else
+                ci=false
+            fi
+        fi
+        if [[ $ci == true ]]; then
+            rc=0
+            os::cloud_init_wait "$name" "$OPT_CLOUD_INIT_TIMEOUT" || rc=$?
+            os::out cloud_init_status "$CLOUD_INIT_STATUS"
+            case $rc in
+                0) ;;
+                "$EX_CLOUDINIT") os::die "$EX_CLOUDINIT" "cloud-init on '$name' finished with status '$CLOUD_INIT_STATUS'" ;;
+                "$EX_TIMEOUT") os::die "$EX_TIMEOUT" "cloud-init on '$name' did not finish within ${OPT_CLOUD_INIT_TIMEOUT}s" ;;
+                *) os::die "$rc" "cloud-init wait failed" ;;
+            esac
+        fi
+    else
+        os::out ssh_ready false
+    fi
+    return 0
+}
+
+cmd_create() {
+    os::parse_create_args "$@"
+    os::resolve_name
+    os::region_resolve
+    os::create_flow "$OPT_NAME"
+    os::instance_table
+    os::kv "created" "$CREATE_CREATED"
+    os::kv "reused" "$CREATE_REUSED"
+    os::kv "ssh ready" "$(os::out_get ssh_ready)"
+    os::kv "cloud-init" "$(os::out_get cloud_init_status)"
+    return 0
+}
+
+###############################################################################
+# delete
+###############################################################################
+
+cmd_delete() {
+    os::parse_delete_args "$@"
+    os::resolve_name
+    os::region_resolve
+    if [[ $DRY_RUN == true ]]; then
+        os::info "DRY-RUN: no resource will be deleted"
+    fi
+    os::delete_flow "$OPT_NAME"
+    os::kv "name" "$OPT_NAME"
+    os::kv "deleted" "$(os::out_get deleted)"
+    [[ -n $(os::out_get snapshot_name) ]] && os::kv "snapshot" "$(os::out_get snapshot_name)"
+    return 0
+}
+
+###############################################################################
+# exec
+###############################################################################
+
+# os::exec_flow NAME - run the script exactly once; sets REMOTE_EXIT / EXEC_DURATION; returns the remote status (124 = timeout).
+os::exec_flow() {
+    local name=$1 body="$RUN_DIR/body.sh" script="$RUN_DIR/remote.sh" capture rc=0 start kv key stdout_val
+    os::out_declare name remote_exit_code duration_seconds public_ip username stdout_file stderr_file stdout stdout_truncated
+    os::out name "$name"
+    for kv in "${OPT_ENV[@]+"${OPT_ENV[@]}"}"; do
+        key=${kv%%=*}
+        [[ $kv == *=* ]] || os::die "$EX_USAGE" "--env '$kv' must be NAME=VALUE"
+        os::validate_env_name "$key"
+    done
+    if [[ $SCRIPT_PREPARED != true ]]; then
+        os::script_load "$body"
+        os::ssh_build_script "$body" "$script"
+        SCRIPT_PREPARED=true
+    fi
+    if [[ $SSH_READY != true ]]; then
+        os::ssh_wait "$name" "$OPT_SSH_TIMEOUT" "$EX_SSH"
+    fi
+    capture=$(os::capture_dir "$name")
+    os::out public_ip "$SSH_HOST"
+    os::out username "$SSH_USER"
+    os::info "executing script ($OPT_SCRIPT_SOURCE) on $SSH_USER@$SSH_HOST as $OPT_SHELL$([[ $OPT_SUDO == true ]] && printf ' with sudo')"
+    start=$SECONDS
+    os::ssh_run_script "$name" "$script" "$OPT_EXEC_TIMEOUT" "$capture" || rc=$?
+    EXEC_DURATION=$((SECONDS - start))
+    os::out duration_seconds "$EXEC_DURATION"
+    if (( rc == 124 )); then
+        REMOTE_EXIT=""
+        os::out remote_exit_code ""
+    else
+        REMOTE_EXIT=$rc
+        os::out remote_exit_code "$rc"
+    fi
+    if [[ -n $capture && -f $capture/stdout.log ]]; then
+        os::out stdout_file "$capture/stdout.log"
+        os::out stderr_file "$capture/stderr.log"
+        stdout_val=$(head -c "$OUTPUT_MAX_BYTES" "$capture/stdout.log")
+        os::out stdout "$stdout_val"
+        if (( $(wc -c <"$capture/stdout.log") > OUTPUT_MAX_BYTES )); then
+            os::out stdout_truncated true
+        else
+            os::out stdout_truncated false
+        fi
+    fi
+    if (( rc == 0 )); then
+        os::info "remote script finished successfully in ${EXEC_DURATION}s"
+    elif (( rc == 124 )); then
+        os::error "remote script killed after ${OPT_EXEC_TIMEOUT}s (--exec-timeout)"
+    else
+        os::warn "remote script exited with status $rc after ${EXEC_DURATION}s"
+    fi
+    return "$rc"
+}
+
+# os::exec_exit RC - map a remote status to the process exit code.
+os::exec_exit() {
+    local rc=$1
+    case $rc in
+        0) return 0 ;;
+        124) os::die "$EX_TIMEOUT" "remote script timed out after ${OPT_EXEC_TIMEOUT}s" ;;
+        255) os::die "$EX_SSH" "ssh transport failure while running the remote script" ;;
+    esac
+    if [[ $OPT_PASSTHROUGH == true ]]; then
+        REMOTE_PASSTHROUGH=true
+        EXIT_CODE=$rc
+        os::error "remote script exited with status $rc"
+        exit "$rc"
+    fi
+    os::die "$EX_REMOTE" "remote script exited with status $rc"
+}
+
+cmd_exec() {
+    local rc=0
+    os::parse_exec_args "$@"
+    os::resolve_name
+    os::region_resolve
+    os::ensure_running "$OPT_NAME"
+    os::exec_flow "$OPT_NAME" || rc=$?
+    os::exec_exit "$rc"
+}
+
+###############################################################################
+# copy
+###############################################################################
+
+cmd_copy() {
+    local dest="" arg remote_dest=false remote_src=0 local_src=0 rc=0
+    local -a sources=() scp_args=()
+    os::parse_copy_args "$@"
+    os::resolve_name
+    os::region_resolve
+    if (( ${#POSITIONALS[@]} == 0 )) && [[ -n ${OCTOSAIL_COPY_SOURCE:-} ]]; then
+        os::split_lines "$OCTOSAIL_COPY_SOURCE" POSITIONALS
+        [[ -n ${OCTOSAIL_COPY_DESTINATION:-} ]] && POSITIONALS+=("$OCTOSAIL_COPY_DESTINATION")
+    fi
+    (( ${#POSITIONALS[@]} >= 2 )) || os::die "$EX_USAGE" "copy needs at least one SRC and a DEST (remote paths are written remote:PATH)"
+    dest=${POSITIONALS[${#POSITIONALS[@]}-1]}
+    sources=("${POSITIONALS[@]:0:${#POSITIONALS[@]}-1}")
+    [[ $dest == remote:* ]] && remote_dest=true
+    for arg in "${sources[@]}"; do
+        if [[ $arg == remote:* ]]; then
+            remote_src=$((remote_src + 1))
+        else
+            local_src=$((local_src + 1))
+        fi
+    done
+    if [[ $remote_dest == true ]]; then
+        (( remote_src == 0 )) || os::die "$EX_USAGE" "when DEST is remote every SRC must be local"
+    else
+        (( local_src == 0 && remote_src > 0 )) || os::die "$EX_USAGE" "exactly one side must be remote (prefix remote paths with remote:)"
+    fi
+    os::ensure_running "$OPT_NAME"
+    os::ssh_wait "$OPT_NAME" "$OPT_SSH_TIMEOUT" "$EX_SSH"
+    [[ $OPT_COPY_RECURSIVE == true ]] && scp_args+=(-r)
+    for arg in "${sources[@]}"; do
+        if [[ $arg == remote:* ]]; then
+            scp_args+=("$(os::remote_path "${arg#remote:}")")
+        else
+            [[ -e $arg ]] || os::die "$EX_USAGE" "local source '$arg' does not exist"
+            scp_args+=("$arg")
+        fi
+    done
+    if [[ $remote_dest == true ]]; then
+        scp_args+=("$(os::remote_path "${dest#remote:}")")
+    else
+        scp_args+=("$dest")
+    fi
+    os::out_declare name copied_files
+    os::out name "$OPT_NAME"
+    os::info "copying ${#sources[@]} item(s) $([[ $remote_dest == true ]] && printf 'to' || printf 'from') $SSH_USER@$SSH_HOST"
+    os::scp "$OPT_NAME" "${scp_args[@]}" || rc=$?
+    (( rc == 0 )) || os::die "$EX_SSH" "scp failed with status $rc"
+    os::out copied_files "${#sources[@]}"
+    os::kv "name" "$OPT_NAME"
+    os::kv "copied" "${#sources[@]}"
+    return 0
+}
+
+###############################################################################
+# start / stop / reboot
+###############################################################################
+
+os::power_outputs() {
+    os::out_declare name state changed public_ip
+    os::out name "$INST_NAME"
+    os::out state "$INST_STATE"
+    os::out public_ip "$INST_PUBLIC_IP"
+    JSON_INSTANCE=$INST_JSON
+}
+
+cmd_start() {
+    local rc=0 changed=false
+    os::parse_power_args start "$@"
+    os::resolve_name
+    os::region_resolve
+    os::instance_get "$OPT_NAME" || rc=$?
+    (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "instance '$OPT_NAME' does not exist"
+    case $INST_STATE in
+        running) os::info "instance '$OPT_NAME' is already running" ;;
+        pending|starting|rebooting) os::info "instance '$OPT_NAME' is $INST_STATE" ;;
+        *)
+            os::info "starting instance '$OPT_NAME'"
+            os::aws_must lightsail start-instance --instance-name "$OPT_NAME"
+            os::op_wait "$AWS_OUT"
+            changed=true
+            ;;
+    esac
+    if [[ $OPT_WAIT == true || $OPT_WAIT_SSH == true ]] && [[ $INST_STATE != running ]]; then
+        os::state_wait "$OPT_NAME" running "$OPT_STATE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$OPT_NAME' did not reach 'running' within ${OPT_STATE_TIMEOUT}s"
+    fi
+    [[ $changed == true && $DRY_RUN != true ]] && { os::instance_get "$OPT_NAME" || true; }
+    if [[ $OPT_WAIT_SSH == true ]]; then
+        os::ssh_wait "$OPT_NAME" "$OPT_SSH_TIMEOUT" "$EX_TIMEOUT"
+    fi
+    os::power_outputs
+    os::out changed "$changed"
+    os::kv "name" "$INST_NAME"
+    os::kv "state" "$INST_STATE"
+    os::kv "changed" "$changed"
+    os::kv "public ip" "$INST_PUBLIC_IP"
+    return 0
+}
+
+cmd_stop() {
+    local rc=0 changed=false
+    local -a args=()
+    os::parse_power_args stop "$@"
+    os::resolve_name
+    os::region_resolve
+    os::instance_get "$OPT_NAME" || rc=$?
+    (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "instance '$OPT_NAME' does not exist"
+    case $INST_STATE in
+        stopped) os::info "instance '$OPT_NAME' is already stopped" ;;
+        stopping) os::info "instance '$OPT_NAME' is already stopping" ;;
+        *)
+            [[ $OPT_FORCE_STOP == true ]] && args+=(--force)
+            os::info "stopping instance '$OPT_NAME'$([[ $OPT_FORCE_STOP == true ]] && printf ' (forced)')"
+            os::aws_must lightsail stop-instance --instance-name "$OPT_NAME" "${args[@]+"${args[@]}"}"
+            os::op_wait "$AWS_OUT"
+            changed=true
+            ;;
+    esac
+    if [[ $OPT_WAIT == true && $INST_STATE != stopped ]]; then
+        os::state_wait "$OPT_NAME" stopped "$OPT_STATE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$OPT_NAME' did not reach 'stopped' within ${OPT_STATE_TIMEOUT}s"
+    fi
+    [[ $changed == true && $DRY_RUN != true ]] && { os::instance_get "$OPT_NAME" || true; }
+    os::power_outputs
+    os::out changed "$changed"
+    os::kv "name" "$INST_NAME"
+    os::kv "state" "$INST_STATE"
+    os::kv "changed" "$changed"
+    return 0
+}
+
+cmd_reboot() {
+    local rc=0 changed=true boot_before="" boot_after="" deadline attempts=0 max_attempts interval
+    os::parse_power_args reboot "$@"
+    os::resolve_name
+    os::region_resolve
+    os::instance_get "$OPT_NAME" || rc=$?
+    (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "instance '$OPT_NAME' does not exist"
+    if [[ $INST_STATE == stopped ]]; then
+        os::warn "instance '$OPT_NAME' is stopped; a reboot is treated as start"
+        os::aws_must lightsail start-instance --instance-name "$OPT_NAME"
+        os::op_wait "$AWS_OUT"
+    elif [[ $OPT_HARD == true ]]; then
+        os::info "hard reboot: stopping instance '$OPT_NAME'"
+        if [[ $INST_STATE != stopping ]]; then
+            os::aws_must lightsail stop-instance --instance-name "$OPT_NAME"
+            os::op_wait "$AWS_OUT"
+        fi
+        os::state_wait "$OPT_NAME" stopped "$OPT_STATE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$OPT_NAME' did not stop within ${OPT_STATE_TIMEOUT}s"
+        os::info "hard reboot: starting instance '$OPT_NAME'"
+        os::aws_must lightsail start-instance --instance-name "$OPT_NAME"
+        os::op_wait "$AWS_OUT"
+    else
+        if [[ $OPT_WAIT_SSH == true && $INST_STATE == running ]]; then
+            os::ssh_wait "$OPT_NAME" "$OPT_SSH_TIMEOUT" "$EX_TIMEOUT"
+            os::ssh_boot_id "$OPT_NAME"
+            boot_before=$BOOT_ID
+            [[ -n $boot_before ]] || os::warn "could not read the boot id before the reboot; falling back to a plain readiness probe"
+        fi
+        os::info "rebooting instance '$OPT_NAME'"
+        os::aws_must lightsail reboot-instance --instance-name "$OPT_NAME"
+        os::op_wait "$AWS_OUT"
+    fi
+    if [[ $OPT_WAIT == true || $OPT_WAIT_SSH == true ]]; then
+        os::state_wait "$OPT_NAME" running "$OPT_STATE_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$OPT_NAME' did not reach 'running' within ${OPT_STATE_TIMEOUT}s"
+    fi
+    [[ $DRY_RUN != true ]] && { os::instance_get "$OPT_NAME" || true; }
+    if [[ $OPT_WAIT_SSH == true && $DRY_RUN != true ]]; then
+        SSH_READY=false
+        ACCESS_JSON=""
+        os::ssh_wait "$OPT_NAME" "$OPT_SSH_TIMEOUT" "$EX_TIMEOUT"
+        if [[ -n $boot_before ]]; then
+            deadline=$((SECONDS + OPT_SSH_TIMEOUT))
+            max_attempts=$(os::max_attempts "$OPT_SSH_TIMEOUT")
+            interval=5
+            while :; do
+                os::ssh_boot_id "$OPT_NAME"
+                boot_after=$BOOT_ID
+                if [[ -n $boot_after && $boot_after != "$boot_before" ]]; then
+                    os::info "instance '$OPT_NAME' came back with a new boot id"
+                    break
+                fi
+                attempts=$((attempts + 1))
+                if (( SECONDS >= deadline || attempts >= max_attempts )); then
+                    os::die "$EX_TIMEOUT" "instance '$OPT_NAME' did not report a new boot id within ${OPT_SSH_TIMEOUT}s"
+                fi
+                os::sleep "$interval"
+                interval=$(os::backoff "$interval" 20)
+            done
+        fi
+    fi
+    os::power_outputs
+    os::out changed "$changed"
+    os::kv "name" "$INST_NAME"
+    os::kv "state" "$INST_STATE"
+    os::kv "public ip" "$INST_PUBLIC_IP"
+    return 0
+}
+
+###############################################################################
+# status
+###############################################################################
+
+cmd_status() {
+    local rc=0
+    os::parse_status_args "$@"
+    os::resolve_name
+    os::region_resolve
+    os::out_declare exists name state public_ip private_ip ipv6_addresses username region availability_zone \
+        blueprint_id bundle_id arn key_pair_name static_ip_name expires_at
+    os::out name "$OPT_NAME"
+    os::instance_get "$OPT_NAME" || rc=$?
+    if (( rc == EX_NOTFOUND )); then
+        os::out exists false
+        if [[ $OPT_IF_MISSING == fail ]]; then
+            os::die "$EX_NOTFOUND" "instance '$OPT_NAME' does not exist"
+        fi
+        os::kv "name" "$OPT_NAME"
+        os::kv "exists" "false"
+        return 0
+    fi
+    os::out exists true
+    os::instance_outputs
+    os::instance_table
+    os::kv "ports" "$(os::port_summary "$INST_JSON")"
+    os::kv "tags" "$(jq -r '[(.tags // [])[] | .key + "=" + (.value // "")] | join(", ")' <<<"$INST_JSON")"
+    return 0
+}
+
+###############################################################################
+# wait
+###############################################################################
+
+cmd_wait() {
+    local cond rc=0
+    os::parse_wait_args "$@"
+    os::resolve_name
+    os::region_resolve
+    (( ${#OPT_WAIT_FOR[@]} )) || os::die "$EX_USAGE" "wait needs at least one --for CONDITION (running, stopped, terminated, absent, ssh, cloud-init, operation:ID)"
+    os::out_declare name condition state public_ip cloud_init_status
+    os::out name "$OPT_NAME"
+    if [[ ${OPT_WAIT_FOR[0]} != absent ]]; then
+        os::instance_get "$OPT_NAME" || rc=$?
+        (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "instance '$OPT_NAME' does not exist"
+    fi
+    for cond in "${OPT_WAIT_FOR[@]}"; do
+        os::out condition "$cond"
+        os::info "waiting for '$OPT_NAME': $cond (up to ${OPT_WAIT_TIMEOUT}s)"
+        case $cond in
+            running|stopped|terminated)
+                os::state_wait "$OPT_NAME" "$cond" "$OPT_WAIT_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$OPT_NAME' did not reach '$cond' within ${OPT_WAIT_TIMEOUT}s"
+                ;;
+            absent)
+                os::absent_wait "$OPT_NAME" "$OPT_WAIT_TIMEOUT" || os::die "$EX_TIMEOUT" "instance '$OPT_NAME' still exists after ${OPT_WAIT_TIMEOUT}s"
+                INST_STATE=absent
+                ;;
+            ssh)
+                os::ensure_running "$OPT_NAME"
+                SSH_READY=false
+                os::ssh_wait "$OPT_NAME" "$OPT_WAIT_TIMEOUT" "$EX_TIMEOUT"
+                ;;
+            cloud-init)
+                os::ensure_running "$OPT_NAME"
+                [[ $SSH_READY == true ]] || os::ssh_wait "$OPT_NAME" "$OPT_SSH_TIMEOUT" "$EX_TIMEOUT"
+                rc=0
+                os::cloud_init_wait "$OPT_NAME" "$OPT_WAIT_TIMEOUT" || rc=$?
+                os::out cloud_init_status "$CLOUD_INIT_STATUS"
+                case $rc in
+                    0) ;;
+                    "$EX_CLOUDINIT") os::die "$EX_CLOUDINIT" "cloud-init on '$OPT_NAME' finished with status '$CLOUD_INIT_STATUS'" ;;
+                    *) os::die "$EX_TIMEOUT" "cloud-init on '$OPT_NAME' did not finish within ${OPT_WAIT_TIMEOUT}s" ;;
+                esac
+                ;;
+            operation:*)
+                os::op_wait "$(jq -cn --arg id "${cond#operation:}" '{operations: [{id: $id, status: "Started", isTerminal: false}]}')" "$OPT_WAIT_TIMEOUT"
+                ;;
+            *) os::die "$EX_USAGE" "unknown wait condition '$cond'" ;;
+        esac
+        os::info "condition '$cond' satisfied"
+    done
+    if [[ $INST_STATE != absent ]]; then
+        os::instance_get "$OPT_NAME" || true
+    fi
+    os::out state "$INST_STATE"
+    os::out public_ip "$INST_PUBLIC_IP"
+    JSON_INSTANCE=$INST_JSON
+    os::kv "name" "$OPT_NAME"
+    os::kv "state" "$INST_STATE"
+    return 0
+}
+
+###############################################################################
+# ports
+###############################################################################
+
+cmd_ports() {
+    local rc=0 modifiers=0
+    os::parse_ports_args "$@"
+    os::resolve_name
+    os::region_resolve
+    (( ${#OPT_PORTS_OPEN[@]} )) && modifiers=$((modifiers + 1))
+    (( ${#OPT_PORTS_CLOSE[@]} )) && modifiers=$((modifiers + 1))
+    if (( ${#OPT_PORTS_SET[@]} )) && (( modifiers > 0 )); then
+        os::die "$EX_USAGE" "--set cannot be combined with --open or --close"
+    fi
+    os::out_declare name ports
+    os::out name "$OPT_NAME"
+    local spec
+    for spec in "${OPT_PORTS_SET[@]+"${OPT_PORTS_SET[@]}"}" "${OPT_PORTS_OPEN[@]+"${OPT_PORTS_OPEN[@]}"}" "${OPT_PORTS_CLOSE[@]+"${OPT_PORTS_CLOSE[@]}"}"; do
+        os::parse_port_spec "$spec"
+    done
+    os::instance_get "$OPT_NAME" || rc=$?
+    (( rc == EX_NOTFOUND )) && os::die "$EX_NOTFOUND" "instance '$OPT_NAME' does not exist"
+    if (( ${#OPT_PORTS_SET[@]} )); then
+        os::ports_apply "$OPT_NAME" set "${OPT_PORTS_SET[@]}"
+    fi
+    if (( ${#OPT_PORTS_OPEN[@]} )); then
+        os::ports_apply "$OPT_NAME" open "${OPT_PORTS_OPEN[@]}"
+    fi
+    if (( ${#OPT_PORTS_CLOSE[@]} )); then
+        os::ports_apply "$OPT_NAME" close "${OPT_PORTS_CLOSE[@]}"
+    fi
+    if (( modifiers > 0 || ${#OPT_PORTS_SET[@]} > 0 )) && [[ $DRY_RUN != true ]]; then
+        os::instance_get "$OPT_NAME" || true
+    fi
+    os::out ports "$(os::port_summary "$INST_JSON")"
+    JSON_INSTANCE=$INST_JSON
+    if [[ $JSON_MODE != true ]]; then
+        printf '%-12s %-8s %-24s %s\n' "PORTS" "PROTO" "CIDRS" "IPV6_CIDRS"
+        jq -r '(.networking.ports // [])[] | [
+            (if .fromPort == .toPort then (.fromPort|tostring) else ((.fromPort|tostring) + "-" + (.toPort|tostring)) end),
+            (.protocol|ascii_downcase), ((.cidrs // []) | join(",")), ((.ipv6Cidrs // []) | join(","))] | @tsv' <<<"$INST_JSON" \
+            | while IFS=$'\t' read -r p pr c6 c4; do printf '%-12s %-8s %-24s %s\n' "$p" "$pr" "${c6:--}" "${c4:--}"; done
+    fi
+    return 0
+}
+
+###############################################################################
+# list
+###############################################################################
+
+# os::list_instances - AWS_OUT becomes the JSON array of all instances in the region.
+os::list_instances() {
+    os::aws_paginate lightsail get-instances instances || os::die "$EX_AWS" "get-instances failed: $AWS_ERR"
+}
+
+# os::filter_instances JSON MANAGED EXPIRED RUN_ID NOW - jq filter for list/gc.
+os::filter_instances() {
+    local json=$1 managed=$2 expired=$3 run_id=$4 now=$5
+    jq -c --arg managed "$managed" --arg expired "$expired" --arg run_id "$run_id" --arg now "$now" \
+        --arg tm "$TAG_MANAGED" --arg te "$TAG_EXPIRES" --arg tr "$TAG_RUN_ID" '
+        def tag($k): ([(.tags // [])[] | select(.key == $k) | .value] | first // "");
+        map(select(
+            ($managed != "true" or tag($tm) == "true")
+            and ($expired != "true" or (tag($te) != "" and tag($te) < $now))
+            and ($run_id == "" or tag($tr) == $run_id)
+        ))' <<<"$json"
+}
+
+cmd_list() {
+    local filtered names count
+    os::parse_list_args "$@"
+    os::region_resolve
+    os::out_declare count names
+    os::list_instances
+    filtered=$(os::filter_instances "$AWS_OUT" "$OPT_MANAGED" "$OPT_EXPIRED" "$OPT_RUN_ID" "$(os::now_iso)")
+    count=$(jq -r 'length' <<<"$filtered")
+    names=$(jq -r 'map(.name) | join(",")' <<<"$filtered")
+    os::out count "$count"
+    os::out names "$names"
+    JSON_INSTANCE=$filtered
+    if [[ $JSON_MODE == true ]]; then
+        return 0
+    fi
+    if [[ $OPT_NAMES == true ]]; then
+        jq -r '.[] | .name' <<<"$filtered"
+        return 0
+    fi
+    printf '%-32s %-14s %-16s %-14s %-14s %-8s %s\n' "NAME" "STATE" "PUBLIC_IP" "BUNDLE" "AZ" "MANAGED" "EXPIRES_AT"
+    jq -r --arg tm "$TAG_MANAGED" --arg te "$TAG_EXPIRES" '
+        def tag($k): ([(.tags // [])[] | select(.key == $k) | .value] | first // "");
+        .[] | [.name, (.state.name // ""), (.publicIpAddress // ""), (.bundleId // ""), (.location.availabilityZone // ""),
+               (if tag($tm) == "true" then "yes" else "no" end), tag($te)] | @tsv' <<<"$filtered" \
+        | while IFS=$'\t' read -r n s ip b az m e; do printf '%-32s %-14s %-16s %-14s %-14s %-8s %s\n' "$n" "$s" "${ip:--}" "$b" "$az" "$m" "${e:--}"; done
+    return 0
+}
+
+###############################################################################
+# gc
+###############################################################################
+
+cmd_gc() {
+    local candidates now cutoff="" name rc deleted=0 failed=0
+    local -a deleted_names=() failed_names=()
+    os::parse_gc_args "$@"
+    os::region_resolve
+    os::out_declare deleted_count deleted_names failed_names dry_run
+    os::out dry_run "$DRY_RUN"
+    if [[ $OPT_ALL_MANAGED == true && $ASSUME_YES != true ]]; then
+        os::die "$EX_REFUSED" "gc --all-managed deletes every managed instance in $REGION; confirm with --yes"
+    fi
+    now=$(os::now_iso)
+    if [[ -n $OPT_OLDER_THAN ]]; then
+        os::to_seconds "$OPT_OLDER_THAN" "--older-than"
+        cutoff=$(os::epoch_to_iso $(( $(os::now_epoch) - SECS )))
+    fi
+    os::list_instances
+    candidates=$(jq -c --arg now "$now" --arg cutoff "$cutoff" --arg run_id "$OPT_RUN_ID" --arg all "$OPT_ALL_MANAGED" \
+        --arg tm "$TAG_MANAGED" --arg te "$TAG_EXPIRES" --arg tr "$TAG_RUN_ID" --arg tp "$TAG_PROTECTED" '
+        def tag($k): ([(.tags // [])[] | select(.key == $k) | .value] | first // "");
+        map(select(tag($tm) == "true" and tag($tp) != "true"))
+        | map(select($run_id == "" or tag($tr) == $run_id))
+        | map(select(
+            $all == "true"
+            or (tag($te) != "" and tag($te) < $now)
+            or ($cutoff != "" and (.createdAt // "") != "" and (.createdAt | .[0:19]) < ($cutoff | .[0:19]))
+          ))
+        | map(.name)' <<<"$AWS_OUT")
+    if [[ $(jq -r 'length' <<<"$candidates") -eq 0 ]]; then
+        os::info "gc: nothing to reclaim in $REGION"
+        os::out deleted_count 0
+        os::kv "deleted" "0"
+        return 0
+    fi
+    while IFS= read -r name; do
+        [[ -n $name ]] || continue
+        rc=0
+        os::group "gc: delete $name"
+        (
+            OPT_IF_MISSING=ok
+            OPT_SNAPSHOT_FIRST=""
+            os::delete_flow "$name"
+        ) || rc=$?
+        os::endgroup
+        if (( rc == 0 )); then
+            deleted=$((deleted + 1))
+            deleted_names+=("$name")
+        else
+            failed=$((failed + 1))
+            failed_names+=("$name")
+            os::error "gc: could not delete '$name' (exit $rc)"
+        fi
+    done < <(jq -r '.[]' <<<"$candidates")
+    os::out deleted_count "$deleted"
+    os::out deleted_names "$(IFS=,; printf '%s' "${deleted_names[*]+"${deleted_names[*]}"}")"
+    os::out failed_names "$(IFS=,; printf '%s' "${failed_names[*]+"${failed_names[*]}"}")"
+    os::kv "deleted" "$deleted"
+    os::kv "failed" "$failed"
+    if (( failed > 0 )); then
+        os::die "$EX_CLEANUP" "gc: $failed instance(s) could not be deleted: ${failed_names[*]}"
+    fi
+    return 0
+}
+
+###############################################################################
+# doctor
+###############################################################################
+
+cmd_doctor() {
+    local ok=true cmd ver account rc=0
+    os::parse_doctor_args "$@"
+    os::out_declare ok aws_account region
+    printf '%-14s %s\n' "bash" "ok (${BASH_VERSION})"
+    for cmd in jq ssh scp ssh-keygen curl; do
+        if os::has_cmd "$cmd"; then
+            printf '%-14s %s\n' "$cmd" "ok ($(command -v "$cmd"))"
+        else
+            printf '%-14s %s\n' "$cmd" "MISSING"
+            ok=false
+        fi
+    done
+    if os::has_cmd "$AWS_BIN"; then
+        ver=$("$AWS_BIN" --version 2>&1 </dev/null | head -n1) || ver=""
+        if [[ $ver == aws-cli/2* ]]; then
+            printf '%-14s %s\n' "aws" "ok ($ver)"
+        elif [[ $ver == aws-cli/1* ]]; then
+            printf '%-14s %s\n' "aws" "UNSUPPORTED ($ver; install AWS CLI v2)"
+            ok=false
+        else
+            printf '%-14s %s\n' "aws" "ok (${ver:-version unknown})"
+        fi
+    else
+        printf '%-14s %s\n' "aws" "MISSING"
+        ok=false
+    fi
+    if [[ -n $CONFIG_FILE ]]; then
+        printf '%-14s %s\n' "config" "$CONFIG_FILE"
+    else
+        printf '%-14s %s\n' "config" "none"
+    fi
+    if [[ -d $RUN_DIR && -w $RUN_DIR ]]; then
+        printf '%-14s %s\n' "temp dir" "ok ($TMP_PARENT)"
+    else
+        printf '%-14s %s\n' "temp dir" "NOT WRITABLE ($TMP_PARENT)"
+        ok=false
+    fi
+    REGION=${REGION:-${OCTOSAIL_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}}
+    if [[ -z $REGION ]] && os::has_cmd "$AWS_BIN"; then
+        REGION=$("$AWS_BIN" configure get region 2>/dev/null </dev/null) || REGION=""
+    fi
+    if [[ -n $REGION ]]; then
+        printf '%-14s %s\n' "region" "$REGION"
+    elif [[ $OPT_OFFLINE == true ]]; then
+        printf '%-14s %s\n' "region" "not configured yet (set --region, OCTOSAIL_REGION or AWS_REGION before running commands)"
+    else
+        printf '%-14s %s\n' "region" "NOT CONFIGURED (use --region, OCTOSAIL_REGION or AWS_REGION)"
+        ok=false
+    fi
+    os::out region "$REGION"
+    if [[ $OPT_OFFLINE == true ]]; then
+        printf '%-14s %s\n' "credentials" "skipped (--offline)"
+    elif [[ $ok == true ]]; then
+        os::aws sts get-caller-identity || rc=$?
+        if (( rc == 0 )); then
+            account=$(jq -r '.Account // empty' <<<"$AWS_OUT")
+            os::mask "$account"
+            os::out aws_account "$account"
+            printf '%-14s %s\n' "credentials" "ok (account $account, $(jq -r '.Arn // "unknown"' <<<"$AWS_OUT"))"
+        else
+            printf '%-14s %s\n' "credentials" "FAILED ($AWS_ERR)"
+            ok=false
+        fi
+    else
+        printf '%-14s %s\n' "credentials" "skipped (fix the problems above first)"
+    fi
+    os::out ok "$ok"
+    if [[ $ok != true ]]; then
+        if [[ -z $REGION && $OPT_OFFLINE != true ]]; then
+            os::die "$EX_AUTH" "doctor found problems (see above)"
+        fi
+        if os::has_cmd "$AWS_BIN" && os::has_cmd jq && os::has_cmd ssh && os::has_cmd scp && os::has_cmd ssh-keygen && os::has_cmd curl; then
+            os::die "$EX_AUTH" "doctor found problems (see above)"
+        fi
+        os::die "$EX_DEP" "doctor found problems (see above)"
+    fi
+    printf '%-14s %s\n' "result" "all checks passed"
+    return 0
+}
+
+###############################################################################
+# action (GitHub Actions dispatcher), help, version
+###############################################################################
+
+cmd_action() {
+    local command=${OCTOSAIL_COMMAND:-} word
+    local -a extra=()
+    (( $# == 0 )) || os::die "$EX_USAGE" "'octosail action' takes no arguments; use OCTOSAIL_COMMAND and OCTOSAIL_EXTRA_ARGS"
+    [[ -n $command ]] || os::die "$EX_USAGE" "OCTOSAIL_COMMAND is not set"
+    for word in $COMMANDS; do
+        if [[ $word == "$command" && $word != action ]]; then
+            os::split_lines "${OCTOSAIL_EXTRA_ARGS:-}" extra
+            os::info "action: octosail $command ${extra[*]+"${extra[*]}"}"
+            os::dispatch "$command" "${extra[@]+"${extra[@]}"}"
+            return $?
+        fi
+    done
+    os::die "$EX_USAGE" "OCTOSAIL_COMMAND '$command' is not a valid command (${COMMANDS// / })"
+}
+
+cmd_help() {
+    local topic=""
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for help" ;;
+            *) topic=$1; OPT_SHIFT=1 ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    if [[ -n $topic ]]; then
+        topic=${topic#--}
+        if os::is_command "$topic" && [[ $topic != help ]]; then
+            "usage_$topic"
+            return 0
+        fi
+        os::die "$EX_USAGE" "no help for '$topic'"
+    fi
+    usage_main
+    return 0
+}
+
+# shellcheck disable=SC2120 # arguments are optional
+cmd_version() {
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for version" ;;
+            *) os::die "$EX_USAGE" "version takes no argument" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    if [[ $JSON_MODE == true ]]; then
+        JSON_MODE=false
+        printf '{"name":"octosail","version":"%s"}\n' "$_VERSION"
+    else
+        printf 'octosail %s\n' "$_VERSION"
+    fi
+    return 0
+}
+
+###############################################################################
+# run: create -> wait -> upload -> exec -> download -> delete (guaranteed cleanup)
+###############################################################################
+
+cmd_run() {
+    local rc=0 spec key kv
+    os::parse_run_args "$@"
+    RUN_PHASE=validate
+    os::resolve_name
+    os::region_resolve
+    os::out_declare name created reused state public_ip private_ip ipv6_addresses username region availability_zone \
+        blueprint_id bundle_id arn key_pair_name static_ip_name expires_at ssh_ready cloud_init_status \
+        remote_exit_code duration_seconds stdout_file stderr_file stdout stdout_truncated deleted phase_failed \
+        leaked_instance cleanup_error
+    os::out name "$OPT_NAME"
+    case $OPT_DELETE_POLICY in
+        created|always|never) ;;
+        *) os::die "$EX_USAGE" "--delete-policy must be created, always or never (got '$OPT_DELETE_POLICY')" ;;
+    esac
+    for kv in "${OPT_ENV[@]+"${OPT_ENV[@]}"}"; do
+        key=${kv%%=*}
+        [[ $kv == *=* ]] || os::die "$EX_USAGE" "--env '$kv' must be NAME=VALUE"
+        os::validate_env_name "$key"
+    done
+    os::script_load "$RUN_DIR/body.sh"
+    os::ssh_build_script "$RUN_DIR/body.sh" "$RUN_DIR/remote.sh"
+    SCRIPT_PREPARED=true
+    for spec in "${OPT_UPLOAD[@]+"${OPT_UPLOAD[@]}"}"; do
+        [[ $spec == *:* && -n ${spec%%:*} && -n ${spec#*:} ]] || os::die "$EX_USAGE" "--upload '$spec' must be LOCAL:REMOTE"
+        [[ -e ${spec%%:*} ]] || os::die "$EX_USAGE" "--upload source '${spec%%:*}' does not exist"
+    done
+    for spec in "${OPT_DOWNLOAD[@]+"${OPT_DOWNLOAD[@]}"}"; do
+        [[ $spec == *:* && -n ${spec%%:*} && -n ${spec#*:} ]] || os::die "$EX_USAGE" "--download '$spec' must be REMOTE:LOCAL"
+    done
+    OPT_WAIT=true
+    OPT_WAIT_SSH=true
+
+    RUN_PHASE=create
+    os::group "create instance $OPT_NAME"
+    CLEANUP_INSTANCE=$OPT_NAME
+    os::create_flow "$OPT_NAME"
+    os::endgroup
+
+    if (( ${#OPT_UPLOAD[@]} )); then
+        RUN_PHASE=upload
+        os::group "upload"
+        for spec in "${OPT_UPLOAD[@]}"; do
+            os::transfer "$OPT_NAME" upload "$spec" || os::die "$EX_SSH" "upload of '${spec%%:*}' failed"
+        done
+        os::endgroup
+    fi
+
+    RUN_PHASE="exec"
+    os::group "exec on $OPT_NAME"
+    rc=0
+    os::exec_flow "$OPT_NAME" || rc=$?
+    os::endgroup
+    case $rc in
+        0) RUN_EXIT=0 ;;
+        124) RUN_EXIT=$EX_TIMEOUT; os::out phase_failed exec ;;
+        255) RUN_EXIT=$EX_SSH; os::out phase_failed exec ;;
+        *)
+            if [[ $OPT_PASSTHROUGH == true ]]; then
+                REMOTE_PASSTHROUGH=true
+                RUN_EXIT=$rc
+            else
+                RUN_EXIT=$EX_REMOTE
+            fi
+            os::out phase_failed exec
+            ;;
+    esac
+
+    if (( ${#OPT_DOWNLOAD[@]} )); then
+        RUN_PHASE=download
+        os::group "download"
+        for spec in "${OPT_DOWNLOAD[@]}"; do
+            rc=0
+            os::transfer "$OPT_NAME" download "$spec" || rc=$?
+            if (( rc != 0 )); then
+                if [[ $OPT_STRICT_DOWNLOAD == true ]]; then
+                    os::error "download of '${spec%%:*}' failed (--strict-download)"
+                    if (( RUN_EXIT == 0 )); then
+                        RUN_EXIT=$EX_SSH
+                        os::out phase_failed download
+                    fi
+                else
+                    os::warn "download of '${spec%%:*}' failed (scp exit $rc); continuing"
+                fi
+            fi
+        done
+        os::endgroup
+    fi
+
+    RUN_PHASE=delete
+    EXIT_CODE=$RUN_EXIT
+    os::cleanup_run || true
+    RUN_PHASE=""
+    rc=${EXIT_CODE:-0}
+    os::instance_table
+    os::kv "created" "$CREATE_CREATED"
+    os::kv "reused" "$CREATE_REUSED"
+    os::kv "cloud-init" "$(os::out_get cloud_init_status)"
+    os::kv "remote exit" "$(os::out_get remote_exit_code)"
+    os::kv "duration" "$(os::out_get duration_seconds)s"
+    os::kv "deleted" "$(os::out_get deleted)"
+    if (( rc != 0 )); then
+        if (( rc == RUN_EXIT )) && [[ $(os::out_get phase_failed) == exec ]]; then
+            os::error "run failed: remote script exited with status ${REMOTE_EXIT:-$rc}"
+        elif (( rc == EX_CLEANUP )); then
+            os::error "run failed: the instance could not be deleted (see above)"
+        else
+            os::error "run failed in phase '$(os::out_get phase_failed)' with exit $rc"
+        fi
+        exit "$rc"
+    fi
+    return 0
+}
+
+###############################################################################
+# Usage texts (octosail help [COMMAND])
+###############################################################################
+
+usage_global_options() {
+    cat <<'EOF'
+Global options (accepted by every command, anywhere on the command line):
+  --region REGION          AWS region (OCTOSAIL_REGION, AWS_REGION, AWS_DEFAULT_REGION, aws configure)
+  --profile NAME           AWS CLI profile to use (OCTOSAIL_PROFILE)
+  --config FILE            KEY=VALUE config file (OCTOSAIL_CONFIG; default: ./.octosail.conf,
+                           $XDG_CONFIG_HOME/octosail/config, ~/.octosail.conf)
+  --json                   Print one JSON document on stdout at the end (OCTOSAIL_JSON)
+  -q, --quiet              Only warnings and errors on stderr
+  -v, --verbose            Debug logging, including redacted aws/ssh argv
+  --log-level LEVEL        error | warn | info | debug (OCTOSAIL_LOG_LEVEL)
+  --no-color               Disable colours (also NO_COLOR / OCTOSAIL_NO_COLOR)
+  --poll-interval SECONDS  Base interval between polls, default 5 (OCTOSAIL_POLL_INTERVAL)
+  --timeout DURATION       Whole-invocation wall clock, default 1800s (OCTOSAIL_TIMEOUT); exit 83
+  --github-output FILE     Where key=value outputs are written (default $GITHUB_OUTPUT)
+  --output-prefix PREFIX   Prefix for every output key (OCTOSAIL_OUTPUT_PREFIX)
+  --no-step-summary        Do not write the GitHub step summary (OCTOSAIL_STEP_SUMMARY=false)
+  --dry-run                Read-only: log mutating aws/ssh/scp calls instead of running them
+  --keep-temp              Keep the run directory (key files are always removed)
+  -y, --yes                Allow destructive operations on instances not managed by octosail
+  -h, --help               Help for the command
+  -V, --version            Print the version
+
+Durations accept 30, 90s, 15m, 6h or 2d. Booleans accept true/false, yes/no, on/off, 1/0.
+Precedence: command-line flag > environment variable > config file > built-in default.
+EOF
+}
+
+usage_ssh_options() {
+    cat <<'EOF'
+SSH options:
+  -i, --key-file FILE      Private key file (OCTOSAIL_SSH_KEY_FILE)
+  --key-source SOURCE      auto | file | env | lightsail (OCTOSAIL_SSH_KEY_SOURCE). auto = --key-file,
+                           then OCTOSAIL_SSH_PRIVATE_KEY (PEM, base64 or \n-escaped), then the temporary
+                           key from Lightsail (falling back to the regional default key pair)
+  -u, --user USER          Remote user (OCTOSAIL_SSH_USER; default: the instance's user)
+  --host HOST              Remote address (OCTOSAIL_SSH_HOST; default: the public IPv4)
+  --ssh-port PORT          Remote port, default 22 (OCTOSAIL_SSH_PORT)
+  --host-key-policy P      lightsail (pin the keys Lightsail witnessed, default) | accept-new |
+                           known-hosts | none (OCTOSAIL_HOST_KEY_POLICY)
+  --known-hosts FILE       known_hosts file for the known-hosts policy (OCTOSAIL_KNOWN_HOSTS_FILE)
+  --ssh-opt OPTION         Extra ssh -o option, repeatable (OCTOSAIL_SSH_EXTRA_OPTS, comma separated)
+  --ssh-timeout DURATION   Budget for host keys and the readiness probe (OCTOSAIL_SSH_TIMEOUT)
+EOF
+}
+
+usage_main() {
+    cat <<EOF
+$PROGRAM_NAME (octosail) $_VERSION - create, command and decommission Amazon Lightsail instances
+
+Usage: octosail <command> [options] [--] [args...]
+       octosail --stop NAME | --start NAME | --reboot NAME      (legacy 1.x syntax)
+
+Commands:
+  create   Create (or reuse) an instance; wait for running, SSH and cloud-init; open ports; attach a static IP
+  delete   Guarded, idempotent decommission (optional snapshot first; releases octosail's static IP / key pair)
+  run      create -> wait -> upload -> exec -> download -> delete, in one process with guaranteed cleanup
+  exec     Run a command or script on a running instance over SSH, exactly once
+  copy     Copy files to or from an instance with scp (remote paths are written remote:PATH)
+  start    Start an instance and wait for it
+  stop     Stop an instance and wait for it
+  reboot   Reboot an instance (soft, or --hard = stop + start) and wait for it
+  status   Show an instance and emit its details as outputs
+  wait     Block until a state, SSH, cloud-init, an operation, or the instance's absence
+  ports    Show, open, close or replace the public firewall rules
+  list     List instances (filters: --managed, --expired, --run-id)
+  gc       Delete leaked octosail-managed instances by TTL or age
+  doctor   Check dependencies, region and credentials
+  action   Internal dispatcher used by action.yml (OCTOSAIL_COMMAND + OCTOSAIL_EXTRA_ARGS)
+  help     Show this help, or 'octosail help <command>'
+  version  Print the version
+
+$(usage_global_options)
+
+Exit codes: 0 ok, 2 usage, 80 dependency, 81 auth/region, 82 not found, 83 timeout, 84 state,
+85 AWS API, 86 ssh, 87 refused, 88 cleanup, 89 conflict, 90 cloud-init, 91 remote (--no-passthrough),
+130/143 signal; exec/run pass the remote command's status through by default.
+
+Documentation: https://github.com/octoleo/octosail (README.md and docs/)
+EOF
+}
+
+usage_create() {
+    cat <<EOF
+Usage: octosail create --name NAME [options]
+
+Create a Lightsail instance (or reuse an existing one), then wait until it is running and reachable.
+
+Options:
+  -n, --name NAME              Instance name (OCTOSAIL_NAME; in GitHub Actions defaults to octosail-<run_id>-<run_attempt>)
+  -b, --blueprint ID           Blueprint, default $DEFAULT_BLUEPRINT (OCTOSAIL_BLUEPRINT)
+  -B, --bundle ID              Bundle, default $DEFAULT_BUNDLE (OCTOSAIL_BUNDLE)
+  -z, --availability-zone AZ   Zone, default <region>a (OCTOSAIL_AVAILABILITY_ZONE)
+  --from-snapshot NAME         Create from an instance snapshot instead of a blueprint (OCTOSAIL_FROM_SNAPSHOT)
+  --user-data STRING           cloud-init user data (OCTOSAIL_USER_DATA)
+  --user-data-file FILE        User data from a file, '-' = stdin (OCTOSAIL_USER_DATA_FILE)
+  --key-pair NAME              Existing Lightsail key pair to install (OCTOSAIL_KEY_PAIR)
+  --public-key-file FILE       Import this public key as the key pair, idempotently (OCTOSAIL_PUBLIC_KEY_FILE)
+  -t, --tag KEY=VALUE          Tag, repeatable (OCTOSAIL_TAGS, comma separated)
+  --ttl DURATION               Sets $TAG_EXPIRES for 'octosail gc' (OCTOSAIL_TTL; default 6h in Actions)
+  -p, --open-ports SPEC        Firewall rule, repeatable: [PORT[-PORT]/]PROTO[@CIDR,...] (OCTOSAIL_OPEN_PORTS)
+  --static-ip                  Allocate and attach a static IP named octosail-NAME (OCTOSAIL_STATIC_IP)
+  --static-ip-name NAME        Attach an existing static IP (OCTOSAIL_STATIC_IP_NAME)
+  --ip-address-type TYPE       dualstack | ipv4 | ipv6 (OCTOSAIL_IP_ADDRESS_TYPE)
+  --if-exists MODE             reuse (default) | fail | replace (OCTOSAIL_IF_EXISTS)
+  --wait / --no-wait           Wait for state running, default on (OCTOSAIL_WAIT)
+  --wait-ssh / --no-wait-ssh   Wait until SSH works, default on (OCTOSAIL_WAIT_SSH)
+  --cloud-init-wait MODE       auto (only with user data) | true | false (OCTOSAIL_CLOUD_INIT_WAIT)
+  --cloud-init-strict          Treat a degraded cloud-init as an error (OCTOSAIL_CLOUD_INIT_STRICT)
+  --create-timeout DURATION    Budget until running, default 600s (OCTOSAIL_CREATE_TIMEOUT)
+  --cloud-init-timeout DURATION  Budget for cloud-init, default 900s (OCTOSAIL_CLOUD_INIT_TIMEOUT)
+  --delete-timeout DURATION    Budget for the delete done by --if-exists replace, default 300s (OCTOSAIL_DELETE_TIMEOUT)
+
+$(usage_ssh_options)
+
+Outputs: name created reused state public_ip private_ip ipv6_addresses username region availability_zone
+         blueprint_id bundle_id arn key_pair_name static_ip_name expires_at ssh_ready cloud_init_status
+Exit codes: 0, 2, 81, 82 (key pair / snapshot missing), 83, 84, 85, 86, 88 (replace failed), 89, 90
+EOF
+}
+
+usage_delete() {
+    cat <<EOF
+Usage: octosail delete [--name] NAME [options]
+
+Delete an instance. Refuses instances that are not tagged $TAG_MANAGED=true unless --yes is given, and
+always refuses instances tagged $TAG_PROTECTED=true. Deleting a missing instance succeeds (deleted=false).
+
+Options:
+  -n, --name NAME              Instance name (or the positional argument, or OCTOSAIL_NAME)
+  --wait / --no-wait           Wait until the instance is gone, default on (OCTOSAIL_WAIT)
+  --snapshot-first             Create a snapshot NAME-<UTC timestamp> before deleting (OCTOSAIL_SNAPSHOT_FIRST)
+  --snapshot-name NAME         Name for that snapshot (implies --snapshot-first)
+  --release-static-ip          Also release a static IP that octosail did not allocate (OCTOSAIL_RELEASE_STATIC_IP)
+  --delete-key-pair            Also delete the instance's non-default key pair (OCTOSAIL_DELETE_KEY_PAIR)
+  --if-missing MODE            ok (default) | fail -> exit 82 (OCTOSAIL_IF_MISSING)
+  --force-delete-add-ons       Pass --force-delete-add-ons to Lightsail (OCTOSAIL_FORCE_DELETE_ADD_ONS)
+  --delete-timeout DURATION    Budget for the absence wait, default 300s (OCTOSAIL_DELETE_TIMEOUT)
+  --snapshot-timeout DURATION  Budget for the snapshot, default 900s (OCTOSAIL_SNAPSHOT_TIMEOUT)
+  -y, --yes                    Delete an instance that is not managed by octosail
+
+Outputs: name deleted snapshot_name static_ip_released key_pair_deleted dry_run
+Exit codes: 0, 2, 81, 82, 83, 85, 87 (refused), 89 (snapshot exists)
+EOF
+}
+
+usage_run() {
+    cat <<EOF
+Usage: octosail run [--name NAME] (--script-file FILE | -- COMMAND...) [create, exec, delete options] [options]
+
+One-shot lifecycle: create -> wait (running, SSH, cloud-init) -> upload -> exec -> download -> delete.
+The delete runs even when a phase fails, on Ctrl-C/SIGTERM and on --timeout. Accepts every option of
+'create', 'exec' and 'delete' plus:
+
+  --delete-policy POLICY       created (default: delete only what this run created) | always | never
+                               (OCTOSAIL_DELETE_POLICY)
+  --keep-on-failure            Keep the instance when the run fails (OCTOSAIL_KEEP_ON_FAILURE)
+  --upload LOCAL:REMOTE        scp before exec, repeatable (OCTOSAIL_UPLOAD, one per line)
+  --download REMOTE:LOCAL      scp after exec, even when exec failed, repeatable (OCTOSAIL_DOWNLOAD, one per line)
+  --strict-download            A failed download fails the run (OCTOSAIL_STRICT_DOWNLOAD)
+  --cleanup-wait / --no-cleanup-wait  Wait for the final delete to finish, default on (OCTOSAIL_CLEANUP_WAIT)
+
+Exit code: the remote command's status (or 91 with --no-passthrough); the first failing phase otherwise;
+88 when only the final delete failed (leaked_instance names the instance).
+Outputs: the create and exec outputs plus deleted phase_failed leaked_instance cleanup_error
+EOF
+}
+
+usage_exec() {
+    cat <<EOF
+Usage: octosail exec [--name] NAME [options] (-- COMMAND [ARG...] | --script-file FILE)
+
+Run a script on a running instance over SSH. The script comes from '-- COMMAND...', --script-file (or '-'
+for stdin), OCTOSAIL_SCRIPT, or stdin. It is executed exactly once; only the readiness probe is retried.
+The script is fed to the remote shell on stdin, so it must not read stdin itself.
+
+Options:
+  -n, --name NAME              Instance name (OCTOSAIL_NAME)
+  -f, --script-file FILE       Script file, '-' = stdin (OCTOSAIL_SCRIPT_FILE)
+  -e, --env NAME=VALUE         Export NAME before the script, repeatable (OCTOSAIL_ENV, one per line)
+  --cwd DIR                    cd into DIR before the script (OCTOSAIL_CWD)
+  --shell SHELL                Remote shell, default bash (OCTOSAIL_SHELL)
+  --sudo                       Run as root with 'sudo -n -H' (OCTOSAIL_SUDO)
+  --no-strict                  Do not prepend 'set -euo pipefail' (OCTOSAIL_STRICT=false)
+  --capture                    Tee stdout/stderr into files and outputs (OCTOSAIL_CAPTURE; default on in Actions)
+  --capture-dir DIR            Where captures go (OCTOSAIL_CAPTURE_DIR; default \$RUNNER_TEMP/octosail)
+  --exec-timeout DURATION      Kill the script after this long, exit 83 (OCTOSAIL_EXEC_TIMEOUT; 0 = unlimited)
+  --start-if-stopped           Start a stopped instance first (OCTOSAIL_START_IF_STOPPED)
+  --no-passthrough             Exit 91 on any remote failure instead of the remote status (OCTOSAIL_PASSTHROUGH=false)
+  --state-timeout DURATION     Budget for --start-if-stopped, default 300s (OCTOSAIL_STATE_TIMEOUT)
+
+$(usage_ssh_options)
+
+With --json the remote stdout is captured (not streamed) and returned in the JSON 'stdout' field.
+Outputs: name remote_exit_code duration_seconds public_ip username stdout_file stderr_file stdout stdout_truncated
+Exit codes: the remote status (default), 2, 82, 83 (timeout), 84 (not running), 86 (ssh), 91
+EOF
+}
+
+usage_copy() {
+    cat <<EOF
+Usage: octosail copy [--name] NAME [options] SRC... DEST
+
+Copy files or directories with scp. Exactly one side must be remote, written remote:PATH, e.g.
+  octosail copy web1 ./dist remote:/var/www/app
+  octosail copy web1 remote:/var/log/app.log ./logs/
+
+Options:
+  -n, --name NAME              Instance name (OCTOSAIL_NAME)
+  -r / --no-recursive          Recursive copy, default on (OCTOSAIL_COPY_RECURSIVE)
+  --start-if-stopped           Start a stopped instance first (OCTOSAIL_START_IF_STOPPED)
+
+$(usage_ssh_options)
+
+Outputs: name copied_files
+Exit codes: 0, 2, 82, 84, 86
+EOF
+}
+
+usage_power() {
+    local verb=$1
+    cat <<EOF
+Usage: octosail $verb [--name] NAME [options]
+
+Options:
+  -n, --name NAME              Instance name (OCTOSAIL_NAME)
+  --wait / --no-wait           Wait for the target state, default on (OCTOSAIL_WAIT)
+  --state-timeout DURATION     Budget for the wait, default 300s (OCTOSAIL_STATE_TIMEOUT)
+EOF
+    case $verb in
+        start)
+            cat <<'EOF'
+  --wait-ssh                   Also wait until SSH works (OCTOSAIL_WAIT_SSH)
+EOF
+            ;;
+        stop)
+            cat <<'EOF'
+  --force                      Force the stop (OCTOSAIL_FORCE_STOP)
+EOF
+            ;;
+        reboot)
+            cat <<'EOF'
+  --hard                       Stop, wait for stopped, then start (OCTOSAIL_HARD)
+  --wait-ssh                   Wait until SSH works and a new boot id is seen (OCTOSAIL_WAIT_SSH)
+EOF
+            ;;
+    esac
+    cat <<'EOF'
+
+Outputs: name state changed public_ip
+Exit codes: 0, 2, 82, 83, 84, 85
+EOF
+}
+
+usage_start() { usage_power start; }
+usage_stop() { usage_power stop; }
+usage_reboot() { usage_power reboot; }
+
+usage_status() {
+    cat <<'EOF'
+Usage: octosail status [--name] NAME [--if-missing ok|fail] [--json]
+
+Show an instance and write its details as outputs.
+
+Options:
+  -n, --name NAME              Instance name (OCTOSAIL_NAME)
+  --if-missing MODE            fail (default, exit 82) | ok (exit 0 with exists=false) (OCTOSAIL_IF_MISSING)
+
+Outputs: exists name state public_ip private_ip ipv6_addresses username region availability_zone
+         blueprint_id bundle_id arn key_pair_name static_ip_name expires_at
+EOF
+}
+
+usage_wait() {
+    cat <<'EOF'
+Usage: octosail wait [--name] NAME --for CONDITION [--for CONDITION...] [--wait-timeout DURATION]
+
+Conditions (executed in order): running, stopped, terminated, absent, ssh, cloud-init, operation:ID
+(OCTOSAIL_WAIT_FOR, comma separated). --wait-timeout defaults to 600s (OCTOSAIL_WAIT_TIMEOUT).
+Accepts the SSH options for the ssh and cloud-init conditions.
+
+Outputs: name condition state public_ip cloud_init_status
+Exit codes: 0, 2, 82, 83, 84, 85, 86, 90
+EOF
+}
+
+usage_ports() {
+    cat <<'EOF'
+Usage: octosail ports [--name] NAME [--open SPEC]... [--close SPEC]... [--set SPEC]...
+
+SPEC := [PORT[-PORT]/]PROTO[@CIDR[,CIDR...]]   PROTO: tcp, udp, icmp, icmpv6, all
+  22/tcp                 80-443/tcp@10.0.0.0/8,::/0        icmp        all@203.0.113.0/24
+Without modifiers the current rules are printed. --open and --close add or remove rules one by one;
+--set replaces the whole firewall and cannot be combined with the others.
+Environment: OCTOSAIL_PORTS_OPEN, OCTOSAIL_PORTS_CLOSE, OCTOSAIL_PORTS_SET (comma separated).
+
+Outputs: name ports
+EOF
+}
+
+usage_list() {
+    cat <<'EOF'
+Usage: octosail list [--managed] [--expired] [--run-id ID] [--names] [--json]
+
+Options:
+  --managed                    Only instances tagged octosail:managed=true (OCTOSAIL_MANAGED)
+  --expired                    Only instances whose octosail:expires-at is in the past (OCTOSAIL_EXPIRED)
+  --run-id ID                  Only instances created by that GitHub run (OCTOSAIL_RUN_ID)
+  --names                      Print names only, one per line (OCTOSAIL_NAMES)
+
+Outputs: count names
+EOF
+}
+
+usage_gc() {
+    cat <<'EOF'
+Usage: octosail gc [--older-than DURATION] [--run-id ID] [--all-managed --yes] [--dry-run] [--no-wait]
+
+Delete leaked octosail-managed instances. By default only instances whose octosail:expires-at tag is in
+the past are selected; instances tagged octosail:protected=true are never selected.
+
+Options:
+  --older-than DURATION        Also select managed instances created more than DURATION ago (OCTOSAIL_OLDER_THAN)
+  --run-id ID                  Restrict to instances created by that GitHub run (OCTOSAIL_RUN_ID)
+  --all-managed                Select every managed instance; requires --yes (OCTOSAIL_ALL_MANAGED)
+  --wait / --no-wait           Wait for each delete, default on (OCTOSAIL_WAIT)
+
+Outputs: deleted_count deleted_names failed_names dry_run
+Exit codes: 0, 87 (--all-managed without --yes), 88 (some deletes failed)
+EOF
+}
+
+usage_doctor() {
+    cat <<'EOF'
+Usage: octosail doctor [--offline]
+
+Check bash, the AWS CLI (v2), jq, ssh, scp, ssh-keygen, curl, the temp directory, the region and, unless
+--offline (OCTOSAIL_OFFLINE), the credentials with sts get-caller-identity. Never installs anything.
+
+Outputs: ok aws_account region
+Exit codes: 0, 80 (dependency), 81 (region/credentials)
+EOF
+}
+
+usage_action() {
+    cat <<'EOF'
+Usage: OCTOSAIL_COMMAND=<command> [OCTOSAIL_EXTRA_ARGS=$'--flag\nvalue'] octosail action
+
+Dispatcher used by action.yml: runs OCTOSAIL_COMMAND (validated against the command list) with the
+newline-separated OCTOSAIL_EXTRA_ARGS as arguments. Every other option arrives through its OCTOSAIL_* variable.
+EOF
+}
+
+usage_version() {
+    cat <<'EOF'
+Usage: octosail version [--json]
+EOF
+}
+
+###############################################################################
+# Option parsing primitives
+###############################################################################
+
+# os::opt_split "$@" - split the current argument into OPT_FLAG / OPT_VALUE (for --flag=value).
+os::opt_split() {
+    OPT_FLAG=$1
+    OPT_INLINE=false
+    OPT_VALUE=""
+    OPT_NEXT=${2-}
+    OPT_HAS_NEXT=$(( $# >= 2 ))
+    OPT_SHIFT=1
+    if [[ $1 == --*=* ]]; then
+        OPT_FLAG=${1%%=*}
+        OPT_VALUE=${1#*=}
+        OPT_INLINE=true
+    fi
+}
+
+# os::opt_take - the flag needs a non-empty value (inline or the next argument).
+os::opt_take() {
+    if [[ $OPT_INLINE == true ]]; then
+        OPT_SHIFT=1
+    else
+        (( OPT_HAS_NEXT )) || os::die "$EX_USAGE" "option $OPT_FLAG requires a value"
+        OPT_VALUE=$OPT_NEXT
+        OPT_SHIFT=2
+    fi
+    [[ -n $OPT_VALUE ]] || os::die "$EX_USAGE" "option $OPT_FLAG requires a non-empty value"
+    [[ $OPT_VALUE != --* ]] || os::die "$EX_USAGE" "option $OPT_FLAG requires a value (got '$OPT_VALUE')"
+}
+
+# os::opt_flag - the flag takes no value.
+os::opt_flag() {
+    [[ $OPT_INLINE != true ]] || os::die "$EX_USAGE" "option $OPT_FLAG does not take a value"
+    OPT_SHIFT=1
+}
+
+# os::opt_bool - boolean flag; --flag=false is accepted. Result in BOOL.
+os::opt_bool() {
+    OPT_SHIFT=1
+    if [[ $OPT_INLINE == true ]]; then
+        os::to_bool "$OPT_VALUE" "$OPT_FLAG"
+    else
+        BOOL=true
+    fi
+}
+
+# os::opt_seconds - duration-valued flag. Result in SECS.
+os::opt_seconds() {
+    os::opt_take
+    os::to_seconds "$OPT_VALUE" "$OPT_FLAG"
+}
+
+os::set_log_level() {
+    case $1 in
+        error) LOG_LEVEL_NUM=0 ;;
+        warn|warning) LOG_LEVEL_NUM=1 ;;
+        info) LOG_LEVEL_NUM=2 ;;
+        debug) LOG_LEVEL_NUM=3 ;;
+        *) os::die "$EX_USAGE" "log level must be error, warn, info or debug (got '$1')" ;;
+    esac
+}
+
+# os::parse_opt_global - consume one global option; returns 1 when OPT_FLAG is not a global option.
+os::parse_opt_global() {
+    case $OPT_FLAG in
+        --region) os::opt_take; REGION=$OPT_VALUE ;;
+        --profile) os::opt_take; PROFILE=$OPT_VALUE ;;
+        --config) os::opt_take ;;
+        --json) os::opt_bool; JSON_MODE=$BOOL ;;
+        -q|--quiet) os::opt_flag; LOG_LEVEL_NUM=1 ;;
+        -v|--verbose) os::opt_flag; LOG_LEVEL_NUM=3 ;;
+        --log-level) os::opt_take; os::set_log_level "$OPT_VALUE" ;;
+        --no-color) os::opt_flag; COLOR_ENABLED=false ;;
+        --poll-interval)
+            os::opt_seconds
+            (( SECS >= 1 )) || os::die "$EX_USAGE" "--poll-interval must be at least 1 second"
+            POLL_INTERVAL=$SECS
+            (( POLL_INTERVAL_MAX < POLL_INTERVAL )) && POLL_INTERVAL_MAX=$POLL_INTERVAL
+            ;;
+        --timeout)
+            os::opt_seconds
+            GLOBAL_TIMEOUT=$SECS
+            GLOBAL_DEADLINE=$((SECONDS + SECS))
+            ;;
+        --github-output) os::opt_take; OUTPUT_FILE=$OPT_VALUE ;;
+        --output-prefix) os::opt_take; OUTPUT_PREFIX=$OPT_VALUE ;;
+        --no-step-summary) os::opt_flag; STEP_SUMMARY=false ;;
+        --dry-run) os::opt_bool; DRY_RUN=$BOOL ;;
+        --keep-temp) os::opt_bool; KEEP_TEMP=$BOOL ;;
+        -y|--yes) os::opt_bool; ASSUME_YES=$BOOL ;;
+        -h|--help)
+            os::opt_flag
+            cmd_help "$COMMAND"
+            EXIT_CODE=0
+            exit 0
+            ;;
+        -V|--version)
+            os::opt_flag
+            # shellcheck disable=SC2119 # no arguments to forward here
+            cmd_version
+            EXIT_CODE=0
+            exit 0
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+os::parse_opt_ssh() {
+    case $OPT_FLAG in
+        -i|--key-file) os::opt_take; OPT_SSH_KEY_FILE=$OPT_VALUE ;;
+        --key-source) os::opt_take; OPT_SSH_KEY_SOURCE=$OPT_VALUE ;;
+        -u|--user) os::opt_take; OPT_SSH_USER=$OPT_VALUE ;;
+        --host) os::opt_take; OPT_SSH_HOST=$OPT_VALUE ;;
+        --ssh-port)
+            os::opt_take
+            if [[ ! $OPT_VALUE =~ ^[0-9]+$ ]] || (( OPT_VALUE < 1 || OPT_VALUE > 65535 )); then
+                os::die "$EX_USAGE" "--ssh-port must be 1-65535"
+            fi
+            OPT_SSH_PORT=$OPT_VALUE
+            ;;
+        --host-key-policy)
+            os::opt_take
+            case $OPT_VALUE in
+                lightsail|accept-new|known-hosts|none) OPT_HOST_KEY_POLICY=$OPT_VALUE ;;
+                *) os::die "$EX_USAGE" "--host-key-policy must be lightsail, accept-new, known-hosts or none" ;;
+            esac
+            ;;
+        --known-hosts) os::opt_take; OPT_KNOWN_HOSTS_FILE=$OPT_VALUE ;;
+        --ssh-opt) os::opt_take; OPT_SSH_EXTRA_OPTS+=("$OPT_VALUE") ;;
+        --ssh-timeout) os::opt_seconds; OPT_SSH_TIMEOUT=$SECS ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+os::parse_opt_create() {
+    case $OPT_FLAG in
+        -b|--blueprint) os::opt_take; OPT_BLUEPRINT=$OPT_VALUE ;;
+        -B|--bundle) os::opt_take; OPT_BUNDLE=$OPT_VALUE ;;
+        -z|--availability-zone) os::opt_take; OPT_AZ=$OPT_VALUE ;;
+        --from-snapshot) os::opt_take; OPT_FROM_SNAPSHOT=$OPT_VALUE ;;
+        --user-data) os::opt_take; OPT_USER_DATA=$OPT_VALUE ;;
+        --user-data-file) os::opt_take; OPT_USER_DATA_FILE=$OPT_VALUE ;;
+        --key-pair) os::opt_take; OPT_KEY_PAIR=$OPT_VALUE ;;
+        --public-key-file) os::opt_take; OPT_PUBLIC_KEY_FILE=$OPT_VALUE ;;
+        -t|--tag) os::opt_take; OPT_TAGS+=("$OPT_VALUE") ;;
+        --ttl) os::opt_seconds; OPT_TTL=$SECS ;;
+        -p|--open-ports) os::opt_take; OPT_OPEN_PORTS+=("$OPT_VALUE") ;;
+        --static-ip) os::opt_bool; OPT_STATIC_IP=$BOOL ;;
+        --static-ip-name) os::opt_take; OPT_STATIC_IP_NAME=$OPT_VALUE ;;
+        --ip-address-type)
+            os::opt_take
+            case $OPT_VALUE in
+                dualstack|ipv4|ipv6) OPT_IP_ADDRESS_TYPE=$OPT_VALUE ;;
+                *) os::die "$EX_USAGE" "--ip-address-type must be dualstack, ipv4 or ipv6" ;;
+            esac
+            ;;
+        --if-exists)
+            os::opt_take
+            case $OPT_VALUE in
+                reuse|fail|replace) OPT_IF_EXISTS=$OPT_VALUE ;;
+                *) os::die "$EX_USAGE" "--if-exists must be reuse, fail or replace" ;;
+            esac
+            ;;
+        --wait) os::opt_bool; OPT_WAIT=$BOOL ;;
+        --no-wait) os::opt_flag; OPT_WAIT=false; OPT_WAIT_SSH=false ;;
+        --wait-ssh) os::opt_bool; OPT_WAIT_SSH=$BOOL ;;
+        --no-wait-ssh) os::opt_flag; OPT_WAIT_SSH=false ;;
+        --cloud-init-wait)
+            os::opt_take
+            case $OPT_VALUE in
+                auto) OPT_CLOUD_INIT_WAIT=auto ;;
+                *) os::to_bool "$OPT_VALUE" "--cloud-init-wait"; OPT_CLOUD_INIT_WAIT=$BOOL ;;
+            esac
+            ;;
+        --cloud-init-strict) os::opt_bool; OPT_CLOUD_INIT_STRICT=$BOOL ;;
+        --create-timeout) os::opt_seconds; OPT_CREATE_TIMEOUT=$SECS ;;
+        --cloud-init-timeout) os::opt_seconds; OPT_CLOUD_INIT_TIMEOUT=$SECS ;;
+        --delete-timeout) os::opt_seconds; OPT_DELETE_TIMEOUT=$SECS ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+os::parse_opt_exec() {
+    case $OPT_FLAG in
+        -f|--script-file) os::opt_take; OPT_SCRIPT_FILE=$OPT_VALUE ;;
+        -e|--env) os::opt_take; OPT_ENV+=("$OPT_VALUE") ;;
+        --cwd) os::opt_take; OPT_CWD=$OPT_VALUE ;;
+        --shell) os::opt_take; OPT_SHELL=$OPT_VALUE ;;
+        --sudo) os::opt_bool; OPT_SUDO=$BOOL ;;
+        --strict) os::opt_bool; OPT_STRICT=$BOOL ;;
+        --no-strict) os::opt_flag; OPT_STRICT=false ;;
+        --capture) os::opt_bool; OPT_CAPTURE=$BOOL ;;
+        --no-capture) os::opt_flag; OPT_CAPTURE=false ;;
+        --capture-dir) os::opt_take; OPT_CAPTURE_DIR=$OPT_VALUE ;;
+        --exec-timeout) os::opt_seconds; OPT_EXEC_TIMEOUT=$SECS ;;
+        --start-if-stopped) os::opt_bool; OPT_START_IF_STOPPED=$BOOL ;;
+        --passthrough) os::opt_bool; OPT_PASSTHROUGH=$BOOL ;;
+        --no-passthrough) os::opt_flag; OPT_PASSTHROUGH=false ;;
+        --state-timeout) os::opt_seconds; OPT_STATE_TIMEOUT=$SECS ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+os::parse_opt_delete() {
+    case $OPT_FLAG in
+        --wait) os::opt_bool; OPT_WAIT=$BOOL ;;
+        --no-wait) os::opt_flag; OPT_WAIT=false ;;
+        --snapshot-first) os::opt_bool; if [[ $BOOL == true ]]; then OPT_SNAPSHOT_FIRST=true; else OPT_SNAPSHOT_FIRST=""; fi ;;
+        --snapshot-name) os::opt_take; OPT_SNAPSHOT_FIRST=$OPT_VALUE ;;
+        --release-static-ip) os::opt_bool; OPT_RELEASE_STATIC_IP=$BOOL ;;
+        --delete-key-pair) os::opt_bool; OPT_DELETE_KEY_PAIR=$BOOL ;;
+        --if-missing)
+            os::opt_take
+            case $OPT_VALUE in
+                ok|fail) OPT_IF_MISSING=$OPT_VALUE ;;
+                *) os::die "$EX_USAGE" "--if-missing must be ok or fail" ;;
+            esac
+            ;;
+        --force-delete-add-ons) os::opt_bool; OPT_FORCE_DELETE_ADD_ONS=$BOOL ;;
+        --delete-timeout) os::opt_seconds; OPT_DELETE_TIMEOUT=$SECS ;;
+        --snapshot-timeout) os::opt_seconds; OPT_SNAPSHOT_TIMEOUT=$SECS ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+os::parse_opt_run() {
+    case $OPT_FLAG in
+        --delete-policy) os::opt_take; OPT_DELETE_POLICY=$OPT_VALUE ;;
+        --keep-on-failure) os::opt_bool; OPT_KEEP_ON_FAILURE=$BOOL ;;
+        --upload) os::opt_take; OPT_UPLOAD+=("$OPT_VALUE") ;;
+        --download) os::opt_take; OPT_DOWNLOAD+=("$OPT_VALUE") ;;
+        --strict-download) os::opt_bool; OPT_STRICT_DOWNLOAD=$BOOL ;;
+        --cleanup-wait) os::opt_bool; OPT_CLEANUP_WAIT=$BOOL ;;
+        --no-cleanup-wait) os::opt_flag; OPT_CLEANUP_WAIT=false ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+os::parse_opt_power() {
+    local verb=$1
+    case $OPT_FLAG in
+        --wait) os::opt_bool; OPT_WAIT=$BOOL ;;
+        --no-wait) os::opt_flag; OPT_WAIT=false; OPT_WAIT_SSH=false ;;
+        --wait-ssh)
+            [[ $verb != stop ]] || return 1
+            os::opt_bool
+            OPT_WAIT_SSH=$BOOL
+            ;;
+        --state-timeout) os::opt_seconds; OPT_STATE_TIMEOUT=$SECS ;;
+        --force)
+            [[ $verb == stop ]] || return 1
+            os::opt_bool
+            OPT_FORCE_STOP=$BOOL
+            ;;
+        --hard)
+            [[ $verb == reboot ]] || return 1
+            os::opt_bool
+            OPT_HARD=$BOOL
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+###############################################################################
+# Environment -> command options
+###############################################################################
+
+os::opts_from_env_common() {
+    OPT_NAME=${OCTOSAIL_NAME:-}
+    OPT_WAIT=${OCTOSAIL_WAIT:-true}
+    OPT_STATE_TIMEOUT=${OCTOSAIL_STATE_TIMEOUT:-300}
+    OPT_IF_MISSING=${OCTOSAIL_IF_MISSING:-ok}
+    OPT_START_IF_STOPPED=${OCTOSAIL_START_IF_STOPPED:-false}
+}
+
+# os::opts_from_env_ssh DEFAULT_TIMEOUT
+os::opts_from_env_ssh() {
+    OPT_SSH_KEY_FILE=${OCTOSAIL_SSH_KEY_FILE:-}
+    OPT_SSH_KEY_SOURCE=${OCTOSAIL_SSH_KEY_SOURCE:-auto}
+    case $OPT_SSH_KEY_SOURCE in
+        auto|file|env|lightsail) ;;
+        *) os::die "$EX_USAGE" "OCTOSAIL_SSH_KEY_SOURCE must be auto, file, env or lightsail" ;;
+    esac
+    OPT_SSH_USER=${OCTOSAIL_SSH_USER:-}
+    OPT_SSH_HOST=${OCTOSAIL_SSH_HOST:-}
+    OPT_SSH_PORT=${OCTOSAIL_SSH_PORT:-22}
+    OPT_HOST_KEY_POLICY=${OCTOSAIL_HOST_KEY_POLICY:-lightsail}
+    case $OPT_HOST_KEY_POLICY in
+        lightsail|accept-new|known-hosts|none) ;;
+        *) os::die "$EX_USAGE" "OCTOSAIL_HOST_KEY_POLICY must be lightsail, accept-new, known-hosts or none" ;;
+    esac
+    OPT_KNOWN_HOSTS_FILE=${OCTOSAIL_KNOWN_HOSTS_FILE:-}
+    os::split_commas "${OCTOSAIL_SSH_EXTRA_OPTS:-}" OPT_SSH_EXTRA_OPTS
+    OPT_SSH_TIMEOUT=${OCTOSAIL_SSH_TIMEOUT:-$1}
+}
+
+os::opts_from_env_create() {
+    OPT_BLUEPRINT=${OCTOSAIL_BLUEPRINT:-$DEFAULT_BLUEPRINT}
+    OPT_BUNDLE=${OCTOSAIL_BUNDLE:-$DEFAULT_BUNDLE}
+    OPT_AZ=${OCTOSAIL_AVAILABILITY_ZONE:-}
+    OPT_FROM_SNAPSHOT=${OCTOSAIL_FROM_SNAPSHOT:-}
+    OPT_USER_DATA=${OCTOSAIL_USER_DATA:-}
+    OPT_USER_DATA_FILE=${OCTOSAIL_USER_DATA_FILE:-}
+    OPT_KEY_PAIR=${OCTOSAIL_KEY_PAIR:-}
+    OPT_PUBLIC_KEY_FILE=${OCTOSAIL_PUBLIC_KEY_FILE:-}
+    os::split_commas "${OCTOSAIL_TAGS:-}" OPT_TAGS
+    OPT_TTL=${OCTOSAIL_TTL:-}
+    if [[ -z $OPT_TTL && $IN_ACTIONS == true ]]; then
+        OPT_TTL=21600
+    fi
+    os::split_commas "${OCTOSAIL_OPEN_PORTS:-}" OPT_OPEN_PORTS
+    OPT_STATIC_IP=${OCTOSAIL_STATIC_IP:-false}
+    OPT_STATIC_IP_NAME=${OCTOSAIL_STATIC_IP_NAME:-}
+    OPT_IP_ADDRESS_TYPE=${OCTOSAIL_IP_ADDRESS_TYPE:-}
+    OPT_IF_EXISTS=${OCTOSAIL_IF_EXISTS:-reuse}
+    OPT_WAIT_SSH=${OCTOSAIL_WAIT_SSH:-true}
+    OPT_CLOUD_INIT_WAIT=${OCTOSAIL_CLOUD_INIT_WAIT:-auto}
+    case $OPT_CLOUD_INIT_WAIT in
+        auto) ;;
+        *) os::to_bool "$OPT_CLOUD_INIT_WAIT" "OCTOSAIL_CLOUD_INIT_WAIT"; OPT_CLOUD_INIT_WAIT=$BOOL ;;
+    esac
+    OPT_CLOUD_INIT_STRICT=${OCTOSAIL_CLOUD_INIT_STRICT:-false}
+    OPT_CREATE_TIMEOUT=${OCTOSAIL_CREATE_TIMEOUT:-600}
+    OPT_CLOUD_INIT_TIMEOUT=${OCTOSAIL_CLOUD_INIT_TIMEOUT:-900}
+    OPT_DELETE_TIMEOUT=${OCTOSAIL_DELETE_TIMEOUT:-300}
+}
+
+os::opts_from_env_exec() {
+    OPT_SCRIPT=${OCTOSAIL_SCRIPT:-}
+    OPT_SCRIPT_FILE=${OCTOSAIL_SCRIPT_FILE:-}
+    os::split_lines "${OCTOSAIL_ENV:-}" OPT_ENV
+    OPT_CWD=${OCTOSAIL_CWD:-}
+    OPT_SHELL=${OCTOSAIL_SHELL:-bash}
+    OPT_SUDO=${OCTOSAIL_SUDO:-false}
+    OPT_STRICT=${OCTOSAIL_STRICT:-true}
+    OPT_CAPTURE=${OCTOSAIL_CAPTURE:-}
+    OPT_CAPTURE_DIR=${OCTOSAIL_CAPTURE_DIR:-}
+    OPT_EXEC_TIMEOUT=${OCTOSAIL_EXEC_TIMEOUT:-0}
+    OPT_PASSTHROUGH=${OCTOSAIL_PASSTHROUGH:-true}
+}
+
+os::opts_from_env_delete() {
+    OPT_SNAPSHOT_FIRST=${OCTOSAIL_SNAPSHOT_FIRST:-}
+    case ${OPT_SNAPSHOT_FIRST,,} in
+        ""|0|false|no|off|n) OPT_SNAPSHOT_FIRST="" ;;
+        1|true|yes|on|y) OPT_SNAPSHOT_FIRST=true ;;
+    esac
+    OPT_RELEASE_STATIC_IP=${OCTOSAIL_RELEASE_STATIC_IP:-false}
+    OPT_DELETE_KEY_PAIR=${OCTOSAIL_DELETE_KEY_PAIR:-false}
+    OPT_FORCE_DELETE_ADD_ONS=${OCTOSAIL_FORCE_DELETE_ADD_ONS:-false}
+    OPT_DELETE_TIMEOUT=${OCTOSAIL_DELETE_TIMEOUT:-300}
+    OPT_SNAPSHOT_TIMEOUT=${OCTOSAIL_SNAPSHOT_TIMEOUT:-900}
+}
+
+os::opts_from_env_run() {
+    OPT_DELETE_POLICY=${OCTOSAIL_DELETE_POLICY:-created}
+    OPT_KEEP_ON_FAILURE=${OCTOSAIL_KEEP_ON_FAILURE:-false}
+    os::split_lines "${OCTOSAIL_UPLOAD:-}" OPT_UPLOAD
+    os::split_lines "${OCTOSAIL_DOWNLOAD:-}" OPT_DOWNLOAD
+    OPT_STRICT_DOWNLOAD=${OCTOSAIL_STRICT_DOWNLOAD:-false}
+    OPT_CLEANUP_WAIT=${OCTOSAIL_CLEANUP_WAIT:-true}
+    OPT_COPY_RECURSIVE=${OCTOSAIL_COPY_RECURSIVE:-true}
+}
+
+###############################################################################
+# Per-command argument parsers
+###############################################################################
+
+# os::take_positional_name ARG - the single positional instance name.
+os::take_positional_name() {
+    (( ${#POSITIONALS[@]} == 0 )) || os::die "$EX_USAGE" "unexpected argument '$1' (the instance name was already given)"
+    POSITIONALS+=("$1")
+    OPT_SHIFT=1
+}
+
+# os::apply_positional_name - merge the positional name into OPT_NAME.
+os::apply_positional_name() {
+    if (( ${#POSITIONALS[@]} )); then
+        if [[ -n $OPT_NAME && $OPT_NAME != "${POSITIONALS[0]}" ]]; then
+            os::die "$EX_USAGE" "conflicting instance names '--name $OPT_NAME' and '${POSITIONALS[0]}'"
+        fi
+        OPT_NAME=${POSITIONALS[0]}
+    fi
+}
+
+os::parse_create_args() {
+    os::opts_from_env_common
+    os::opts_from_env_ssh 300
+    os::opts_from_env_create
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) os::die "$EX_USAGE" "create does not take arguments after '--'" ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -*) os::parse_opt_global || os::parse_opt_ssh || os::parse_opt_create || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for create (see 'octosail help create')" ;;
+            *) os::die "$EX_USAGE" "create takes no positional argument; use --name NAME" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+}
+
+os::parse_delete_args() {
+    os::opts_from_env_common
+    os::opts_from_env_delete
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) os::die "$EX_USAGE" "delete does not take arguments after '--'" ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -*) os::parse_opt_global || os::parse_opt_delete || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for delete (see 'octosail help delete')" ;;
+            *) os::take_positional_name "$1" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    os::apply_positional_name
+}
+
+os::parse_run_args() {
+    os::opts_from_env_common
+    os::opts_from_env_ssh 300
+    os::opts_from_env_create
+    os::opts_from_env_exec
+    os::opts_from_env_delete
+    os::opts_from_env_run
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) shift; REST_ARGS=("$@"); break ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -*) os::parse_opt_global || os::parse_opt_ssh || os::parse_opt_create || os::parse_opt_exec || os::parse_opt_delete || os::parse_opt_run || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for run (see 'octosail help run')" ;;
+            *) os::die "$EX_USAGE" "run takes no positional argument; use --name NAME and put the command after '--'" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+}
+
+os::parse_exec_args() {
+    os::opts_from_env_common
+    os::opts_from_env_ssh 60
+    os::opts_from_env_exec
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) shift; REST_ARGS=("$@"); break ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -*) os::parse_opt_global || os::parse_opt_ssh || os::parse_opt_exec || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for exec (see 'octosail help exec')" ;;
+            *) os::take_positional_name "$1" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    os::apply_positional_name
+}
+
+os::parse_copy_args() {
+    os::opts_from_env_common
+    os::opts_from_env_ssh 60
+    OPT_COPY_RECURSIVE=${OCTOSAIL_COPY_RECURSIVE:-true}
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) shift; POSITIONALS+=("$@"); break ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -r|--recursive) os::opt_bool; OPT_COPY_RECURSIVE=$BOOL ;;
+            --no-recursive) os::opt_flag; OPT_COPY_RECURSIVE=false ;;
+            --start-if-stopped) os::opt_bool; OPT_START_IF_STOPPED=$BOOL ;;
+            --state-timeout) os::opt_seconds; OPT_STATE_TIMEOUT=$SECS ;;
+            -*) os::parse_opt_global || os::parse_opt_ssh || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for copy (see 'octosail help copy')" ;;
+            *) POSITIONALS+=("$1"); OPT_SHIFT=1 ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+}
+
+# os::parse_power_args VERB ARGS...
+os::parse_power_args() {
+    local verb=$1
+    shift
+    os::opts_from_env_common
+    os::opts_from_env_ssh 300
+    OPT_WAIT_SSH=${OCTOSAIL_WAIT_SSH:-false}
+    OPT_FORCE_STOP=${OCTOSAIL_FORCE_STOP:-false}
+    OPT_HARD=${OCTOSAIL_HARD:-false}
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) os::die "$EX_USAGE" "$verb does not take arguments after '--'" ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -*) os::parse_opt_global || os::parse_opt_power "$verb" || os::parse_opt_ssh || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for $verb (see 'octosail help $verb')" ;;
+            *) os::take_positional_name "$1" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    os::apply_positional_name
+}
+
+os::parse_status_args() {
+    os::opts_from_env_common
+    OPT_IF_MISSING=${OCTOSAIL_IF_MISSING:-fail}
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) os::die "$EX_USAGE" "status does not take arguments after '--'" ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            --if-missing)
+                os::opt_take
+                case $OPT_VALUE in
+                    ok|fail) OPT_IF_MISSING=$OPT_VALUE ;;
+                    *) os::die "$EX_USAGE" "--if-missing must be ok or fail" ;;
+                esac
+                ;;
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for status (see 'octosail help status')" ;;
+            *) os::take_positional_name "$1" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    os::apply_positional_name
+}
+
+os::parse_wait_args() {
+    os::opts_from_env_common
+    os::opts_from_env_ssh 300
+    OPT_CLOUD_INIT_STRICT=${OCTOSAIL_CLOUD_INIT_STRICT:-false}
+    OPT_WAIT_TIMEOUT=${OCTOSAIL_WAIT_TIMEOUT:-600}
+    os::split_commas "${OCTOSAIL_WAIT_FOR:-}" OPT_WAIT_FOR
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) os::die "$EX_USAGE" "wait does not take arguments after '--'" ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            --for) os::opt_take; OPT_WAIT_FOR+=("$OPT_VALUE") ;;
+            --wait-timeout) os::opt_seconds; OPT_WAIT_TIMEOUT=$SECS ;;
+            --cloud-init-strict) os::opt_bool; OPT_CLOUD_INIT_STRICT=$BOOL ;;
+            --start-if-stopped) os::opt_bool; OPT_START_IF_STOPPED=$BOOL ;;
+            -*) os::parse_opt_global || os::parse_opt_ssh || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for wait (see 'octosail help wait')" ;;
+            *) os::take_positional_name "$1" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    os::apply_positional_name
+}
+
+os::parse_ports_args() {
+    os::opts_from_env_common
+    os::split_commas "${OCTOSAIL_PORTS_OPEN:-}" OPT_PORTS_OPEN
+    os::split_commas "${OCTOSAIL_PORTS_CLOSE:-}" OPT_PORTS_CLOSE
+    os::split_commas "${OCTOSAIL_PORTS_SET:-}" OPT_PORTS_SET
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) os::die "$EX_USAGE" "ports does not take arguments after '--'" ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            --open) os::opt_take; OPT_PORTS_OPEN+=("$OPT_VALUE") ;;
+            --close) os::opt_take; OPT_PORTS_CLOSE+=("$OPT_VALUE") ;;
+            --set) os::opt_take; OPT_PORTS_SET+=("$OPT_VALUE") ;;
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for ports (see 'octosail help ports')" ;;
+            *) os::take_positional_name "$1" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    os::apply_positional_name
+}
+
+os::parse_list_args() {
+    OPT_MANAGED=${OCTOSAIL_MANAGED:-false}
+    OPT_EXPIRED=${OCTOSAIL_EXPIRED:-false}
+    OPT_RUN_ID=${OCTOSAIL_RUN_ID:-}
+    OPT_NAMES=${OCTOSAIL_NAMES:-false}
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --managed) os::opt_bool; OPT_MANAGED=$BOOL ;;
+            --expired) os::opt_bool; OPT_EXPIRED=$BOOL ;;
+            --run-id) os::opt_take; OPT_RUN_ID=$OPT_VALUE ;;
+            --names) os::opt_bool; OPT_NAMES=$BOOL ;;
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for list (see 'octosail help list')" ;;
+            *) os::die "$EX_USAGE" "list takes no positional argument" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+}
+
+os::parse_gc_args() {
+    os::opts_from_env_common
+    os::opts_from_env_delete
+    OPT_OLDER_THAN=${OCTOSAIL_OLDER_THAN:-}
+    OPT_RUN_ID=${OCTOSAIL_RUN_ID:-}
+    OPT_ALL_MANAGED=${OCTOSAIL_ALL_MANAGED:-false}
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --older-than) os::opt_seconds; OPT_OLDER_THAN=$SECS ;;
+            --run-id) os::opt_take; OPT_RUN_ID=$OPT_VALUE ;;
+            --all-managed) os::opt_bool; OPT_ALL_MANAGED=$BOOL ;;
+            --wait) os::opt_bool; OPT_WAIT=$BOOL ;;
+            --no-wait) os::opt_flag; OPT_WAIT=false ;;
+            --delete-timeout) os::opt_seconds; OPT_DELETE_TIMEOUT=$SECS ;;
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for gc (see 'octosail help gc')" ;;
+            *) os::die "$EX_USAGE" "gc takes no positional argument" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+}
+
+os::parse_doctor_args() {
+    OPT_OFFLINE=${OCTOSAIL_OFFLINE:-false}
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --offline) os::opt_bool; OPT_OFFLINE=$BOOL ;;
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for doctor (see 'octosail help doctor')" ;;
+            *) os::die "$EX_USAGE" "doctor takes no positional argument" ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+}
+
+###############################################################################
+# Global settings from the environment, dispatch, main
+###############################################################################
+
+os::globals_from_env() {
+    if os::in_actions; then
+        IN_ACTIONS=true
+    fi
+    os::set_log_level "${OCTOSAIL_LOG_LEVEL:-info}"
+    if [[ -t 2 && -z ${NO_COLOR:-} && ${OCTOSAIL_NO_COLOR:-false} != true && ${TERM:-} != dumb && $IN_ACTIONS != true ]]; then
+        COLOR_ENABLED=true
+    fi
+    JSON_MODE=${OCTOSAIL_JSON:-false}
+    DRY_RUN=${OCTOSAIL_DRY_RUN:-false}
+    KEEP_TEMP=${OCTOSAIL_KEEP_TEMP:-false}
+    ASSUME_YES=${OCTOSAIL_YES:-false}
+    POLL_INTERVAL=${OCTOSAIL_POLL_INTERVAL:-5}
+    (( POLL_INTERVAL >= 1 )) || POLL_INTERVAL=1
+    POLL_INTERVAL_MAX=${OCTOSAIL_POLL_INTERVAL_MAX:-15}
+    (( POLL_INTERVAL_MAX >= POLL_INTERVAL )) || POLL_INTERVAL_MAX=$POLL_INTERVAL
+    SLEEP_FACTOR=${OCTOSAIL_SLEEP_FACTOR:-1}
+    GLOBAL_TIMEOUT=${OCTOSAIL_TIMEOUT:-1800}
+    GLOBAL_DEADLINE=$((SECONDS + GLOBAL_TIMEOUT))
+    OUTPUT_FILE=${GITHUB_OUTPUT:-}
+    OUTPUT_PREFIX=${OCTOSAIL_OUTPUT_PREFIX:-}
+    STEP_SUMMARY=${OCTOSAIL_STEP_SUMMARY:-true}
+    TMP_PARENT=${OCTOSAIL_TMPDIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}
+    AWS_BIN=${OCTOSAIL_AWS_BIN:-aws}
+    AWS_RETRIES=${OCTOSAIL_AWS_RETRIES:-4}
+    AWS_RETRY_BASE=${OCTOSAIL_AWS_RETRY_BASE:-2}
+    AWS_RETRY_CAP=${OCTOSAIL_AWS_RETRY_CAP:-30}
+    OPERATION_TIMEOUT=${OCTOSAIL_OPERATION_TIMEOUT:-300}
+    OUTPUT_MAX_BYTES=${OCTOSAIL_OUTPUT_MAX_BYTES:-65536}
+    REGION=${OCTOSAIL_REGION:-}
+    PROFILE=${OCTOSAIL_PROFILE:-}
+    os::split_lines "${OCTOSAIL_AWS_EXTRA_ARGS:-}" AWS_EXTRA_ARGS
+}
+
+os::is_command() {
+    local w
+    for w in $COMMANDS; do
+        [[ $w == "$1" ]] && return 0
+    done
+    return 1
+}
+
+# os::dispatch COMMAND ARGS...
+os::dispatch() {
+    local cmd=$1
+    shift
+    COMMAND=$cmd
+    POSITIONALS=()
+    REST_ARGS=()
+    "cmd_$cmd" "$@"
+}
+
+main() {
+    os::install_traps
+    local -a args=("$@")
+    local i a config="" cmd
+    if (( $# == 2 )); then
+        case $1 in
+            --stop) args=(stop --no-wait "$2"); LEGACY=true ;;
+            --start) args=(start --no-wait "$2"); LEGACY=true ;;
+            --reboot) args=(reboot --hard --wait "$2"); LEGACY=true ;;
+        esac
+    fi
+    for (( i = 0; i < ${#args[@]}; i++ )); do
+        a=${args[i]}
+        [[ $a == -- ]] && break
+        if [[ $a == --config ]]; then
+            config=${args[i + 1]:-}
+        elif [[ $a == --config=* ]]; then
+            config=${a#*=}
+        fi
+    done
+    [[ -n $config ]] || config=${OCTOSAIL_CONFIG:-}
+    if [[ -z $config ]]; then
+        config=$(os::config_find)
+    elif [[ $config != /dev/null && ! -f $config ]]; then
+        os::die "$EX_USAGE" "config file '$config' not found"
+    fi
+    os::config_load "$config"
+    os::env_normalise
+    os::globals_from_env
+    os::out_declare exit_code exit_name octosail_version
+    set -- "${args[@]+"${args[@]}"}"
+    while (( $# )); do
+        os::opt_split "$@"
+        case $OPT_FLAG in
+            --) break ;;
+            -*) os::parse_opt_global || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' (see 'octosail help')" ;;
+            *) break ;;
+        esac
+        shift "$OPT_SHIFT"
+    done
+    if (( $# == 0 )); then
+        usage_main >&2
+        os::die "$EX_USAGE" "no command given"
+    fi
+    cmd=$1
+    shift
+    os::is_command "$cmd" || os::die "$EX_USAGE" "unknown command '$cmd' (see 'octosail help')"
+    if [[ $LEGACY == true ]]; then
+        os::warn "legacy syntax; use 'octosail $cmd NAME' (see 'octosail help $cmd')"
+    fi
+    case $cmd in
+        help|version)
+            os::dispatch "$cmd" "$@"
+            EXIT_CODE=0
+            exit 0
+            ;;
+    esac
+    if [[ $cmd != doctor ]]; then
+        os::require_cmd jq
+    fi
+    os::mkrundir
+    os::dispatch "$cmd" "$@"
+    EXIT_CODE=${EXIT_CODE:-$EX_OK}
+    exit "$EXIT_CODE"
+}
+
+if [[ -z ${OCTOSAIL_SOURCED:-} ]]; then
+    main "$@"
+fi

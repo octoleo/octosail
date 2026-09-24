@@ -1,0 +1,51 @@
+# Cleanup layer A: one `run` step creates the instance, runs the script and
+# deletes the instance again - also on failure, timeout or cancellation.
+# Pin @v2.0.0 instead of @v2 for reproducible builds.
+name: Run on a fresh Lightsail box
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Create, run, delete
+        id: box
+        uses: octoleo/octosail@v2 # pin @v2.0.0 for reproducibility
+        with:
+          command: run
+          blueprint: ubuntu_24_04
+          bundle: nano_3_0
+          ttl: 1h
+          upload: |
+            ./src:/home/ubuntu/src
+          script: |
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq shellcheck
+            shellcheck /home/ubuntu/src/octosail | tee /home/ubuntu/shellcheck.log
+          download: |
+            /home/ubuntu/shellcheck.log:./shellcheck.log
+
+      - name: Show what happened
+        env:
+          EXIT_CODE: ${{ steps.box.outputs.exit_code }}
+          EXIT_NAME: ${{ steps.box.outputs.exit_name }}
+          DELETED: ${{ steps.box.outputs.deleted }}
+          DURATION: ${{ steps.box.outputs.duration_seconds }}
+        run: |
+          echo "remote exit $EXIT_CODE ($EXIT_NAME) after ${DURATION}s, instance deleted=$DELETED"
+          cat shellcheck.log

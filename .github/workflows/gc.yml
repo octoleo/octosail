@@ -1,0 +1,43 @@
+# Cleanup layer C: reclaim octosail-managed instances whose TTL has expired,
+# even when the job that created them was killed before it could delete them.
+# Enable by setting the repository variable OCTOSAIL_GC to "true" and the
+# secret AWS_ROLE_ARN to an OIDC role (see docs/iam-policy.json).
+name: Lightsail garbage collection
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  gc:
+    if: vars.OCTOSAIL_GC == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Delete expired instances
+        id: gc
+        uses: ./ # octoleo/octosail@v2 when copied
+        with:
+          command: gc
+
+      - name: Report
+        env:
+          DELETED_COUNT: ${{ steps.gc.outputs.deleted_count }}
+          DELETED_NAMES: ${{ steps.gc.outputs.deleted_names }}
+          FAILED_NAMES: ${{ steps.gc.outputs.failed_names }}
+        run: |
+          echo "deleted $DELETED_COUNT instance(s): $DELETED_NAMES"
+          if [ -n "$FAILED_NAMES" ]; then
+            echo "::warning::gc could not delete: $FAILED_NAMES"
+          fi

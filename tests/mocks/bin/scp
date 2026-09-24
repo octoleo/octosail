@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# Mock scp for the octosail test-suite.  user@host:PATH is mapped onto the
+# local directory $MOCK_REMOTE_HOME (absolute /a/b -> $MOCK_REMOTE_HOME/a/b,
+# relative x -> $MOCK_REMOTE_HOME/x) and files are copied with cp -R.
+# Logs one JSON line per call to $MOCK_SSH_LOG (tool "scp") and hardening
+# violations to $MOCK_SSH_VIOLATIONS exactly like the mock ssh.
+# MOCK_SCP_FAIL=1 -> exit 1 with "scp: injected failure".
+set -euo pipefail
+
+if [[ -z ${MOCK_STATE_DIR:-} ]]; then
+  echo "mock scp used outside tests" >&2
+  exit 97
+fi
+TOOL=scp
+ARGV=("$@")
+MOCK_REMOTE_HOME=${MOCK_REMOTE_HOME:-$MOCK_STATE_DIR/remote-home}
+mkdir -p "$MOCK_STATE_DIR/counters" "$MOCK_REMOTE_HOME"
+
+# ---------------------------------------------------------------------------
+# argument parsing:  scp [-r] [-o opt]... [-i key] [-P port] [--] SRC... DEST
+# ---------------------------------------------------------------------------
+declare -a OPTS=() POS=()
+KEY="" PORT=22 KEY_GIVEN=false RECURSIVE=false
+while (($#)); do
+  case $1 in
+    -o) OPTS+=("${2:-}"); shift 2 ;;
+    -o?*) OPTS+=("${1#-o}"); shift ;;
+    -i) KEY=${2:-}; KEY_GIVEN=true; shift 2 ;;
+    -i?*) KEY=${1#-i}; KEY_GIVEN=true; shift ;;
+    -P) PORT=${2:-22}; shift 2 ;;
+    -P?*) PORT=${1#-P}; shift ;;
+    -r) RECURSIVE=true; shift ;;
+    -F|-S|-l|-c|-J|-D|-X) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) POS+=("$1"); shift ;;
+  esac
+done
+POS+=("$@")
+if ((${#POS[@]} < 2)); then
+  echo "usage: scp [-r] [-i identity_file] [-o ssh_option] [-P port] source ... target" >&2
+  exit 1
+fi
+DEST=${POS[${#POS[@]} - 1]}
+SRCS=("${POS[@]:0:${#POS[@]} - 1}")
+
+is_remote() { [[ $1 =~ ^([^@:/]+@)?[^:/]+:.*$ ]]; }
+remote_user_host() { printf '%s' "${1%%:*}"; }
+remote_path() { printf '%s' "${1#*:}"; }
+map_remote() { # remote path -> local path under MOCK_REMOTE_HOME
+  local p=$1 tilde='~'
+  case $p in
+    "") printf '%s' "$MOCK_REMOTE_HOME" ;;
+    "$tilde") printf '%s' "$MOCK_REMOTE_HOME" ;;
+    "$tilde/"*) printf '%s/%s' "$MOCK_REMOTE_HOME" "${p#"$tilde"/}" ;;
+    /*) printf '%s%s' "$MOCK_REMOTE_HOME" "$p" ;;
+    *) printf '%s/%s' "$MOCK_REMOTE_HOME" "$p" ;;
+  esac
+}
+
+DIRECTION="" TARGET=""
+if is_remote "$DEST"; then
+  DIRECTION=upload
+  TARGET=$(remote_user_host "$DEST")
+  for s in "${SRCS[@]}"; do
+    if is_remote "$s"; then echo "scp: mock does not support remote-to-remote copies" >&2; exit 1; fi
+  done
+else
+  DIRECTION=download
+  for s in "${SRCS[@]}"; do
+    is_remote "$s" || { printf 'scp: mock requires exactly one remote side (%s is local, %s is local)\n' "$s" "$DEST" >&2; exit 1; }
+  done
+  TARGET=$(remote_user_host "${SRCS[0]}")
+fi
+if [[ $TARGET == *@* ]]; then
+  USER_NAME=${TARGET%%@*}
+  HOST=${TARGET#*@}
+else
+  USER_NAME=$(id -un)
+  HOST=$TARGET
+fi
+
+opt_get() {
+  local want=${1,,} o k
+  for o in "${OPTS[@]+"${OPTS[@]}"}"; do
+    k=${o%%=*}
+    if [[ ${k,,} == "$want" ]]; then printf '%s' "${o#*=}"; return 0; fi
+  done
+  return 1
+}
+BATCH=$(opt_get BatchMode || true)
+IDONLY=$(opt_get IdentitiesOnly || true)
+KNOWN_HOSTS=$(opt_get UserKnownHostsFile || true)
+STRICT=$(opt_get StrictHostKeyChecking || true)
+CERT=$(opt_get CertificateFile || true)
+
+# ---------------------------------------------------------------------------
+# logging and hardening checks
+# ---------------------------------------------------------------------------
+if [[ -n ${MOCK_SSH_LOG:-} ]]; then
+  mkdir -p "$(dirname "$MOCK_SSH_LOG")"
+  opts_json=$(jq -cn '$ARGS.positional | map(capture("^(?<key>[^=]*)=?(?<value>.*)$")) | from_entries' --args -- "${OPTS[@]+"${OPTS[@]}"}")
+  jq -cn --arg tool "$TOOL" --arg host "$HOST" --arg user "$USER_NAME" --arg port "$PORT" --argjson options "$opts_json" \
+    --arg key "$KEY" --arg cert "$CERT" --arg kh "$KNOWN_HOSTS" --arg strict "$STRICT" --arg cwd "$PWD" \
+    --argjson recursive "$RECURSIVE" --arg direction "$DIRECTION" \
+    '{tool: $tool, host: $host, user: $user, port: ($port | tonumber? // $port), options: $options, key_file: $key,
+      cert_file: $cert, known_hosts: $kh, strict: $strict, sudo: false, command: $ARGS.positional, cwd: $cwd,
+      recursive: $recursive, direction: $direction}' \
+    --args -- "${POS[@]}" >> "$MOCK_SSH_LOG"
+fi
+
+file_mode() {
+  local m
+  if m=$(stat -c '%a' "$1" 2> /dev/null); then printf '%s' "$m"; return 0; fi
+  if m=$(stat -f '%Lp' "$1" 2> /dev/null); then printf '%s' "$m"; return 0; fi
+  return 1
+}
+violate() {
+  [[ -n ${MOCK_SSH_VIOLATIONS:-} ]] || return 0
+  mkdir -p "$(dirname "$MOCK_SSH_VIOLATIONS")"
+  printf '%s: %s | argv: %s\n' "$TOOL" "$1" "${ARGV[*]}" >> "$MOCK_SSH_VIOLATIONS"
+}
+if [[ $KEY_GIVEN != true ]]; then
+  violate "missing -i identity file"
+elif [[ ! -f $KEY ]]; then
+  violate "identity file does not exist: $KEY"
+else
+  mode=$(file_mode "$KEY" || echo unknown)
+  [[ $mode == 600 ]] || violate "identity file mode is $mode, expected 600: $KEY"
+fi
+[[ ${BATCH,,} == yes ]] || violate "BatchMode=yes missing"
+[[ ${IDONLY,,} == yes ]] || violate "IdentitiesOnly=yes missing"
+if [[ -z $KNOWN_HOSTS ]]; then
+  violate "UserKnownHostsFile missing"
+elif [[ $KNOWN_HOSTS != /dev/null ]]; then
+  if [[ ! -e $KNOWN_HOSTS ]]; then
+    [[ ${STRICT,,} == yes ]] && violate "UserKnownHostsFile does not exist while StrictHostKeyChecking=yes: $KNOWN_HOSTS"
+  elif [[ ! -r $KNOWN_HOSTS ]]; then
+    violate "UserKnownHostsFile is not readable: $KNOWN_HOSTS"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# injected failures (same connection-level ones as the mock ssh)
+# ---------------------------------------------------------------------------
+truthy() { [[ -n ${1:-} && $1 != 0 && $1 != false ]]; }
+if truthy "${MOCK_SCP_FAIL:-}"; then
+  echo "scp: injected failure" >&2
+  exit 1
+fi
+if truthy "${MOCK_SSH_AUTH_FAIL:-}"; then
+  printf '%s@%s: Permission denied (publickey).\n' "$USER_NAME" "$HOST" >&2
+  exit 255
+fi
+if truthy "${MOCK_SSH_HOSTKEY_MISMATCH:-}"; then
+  printf '@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.\n' >&2
+  exit 255
+fi
+if truthy "${MOCK_SSH_ALWAYS_FAIL:-}"; then
+  printf 'ssh: connect to host %s port %s: Connection timed out\n' "$HOST" "$PORT" >&2
+  exit 255
+fi
+
+# ---------------------------------------------------------------------------
+# the copy
+# ---------------------------------------------------------------------------
+copy_one() { # src dest(final path or existing dir)
+  local src=$1 dst=$2
+  if [[ -d $src && $RECURSIVE != true ]]; then
+    printf 'scp: %s: not a regular file\n' "$src" >&2
+    return 1
+  fi
+  if [[ ! -e $src ]]; then
+    printf 'scp: %s: No such file or directory\n' "$src" >&2
+    return 1
+  fi
+  if [[ -d $dst ]]; then
+    cp -R "$src" "$dst/"
+  else
+    mkdir -p "$(dirname "$dst")"
+    cp -R "$src" "$dst"
+  fi
+}
+rc=0
+if [[ $DIRECTION == upload ]]; then
+  dst=$(map_remote "$(remote_path "$DEST")")
+  # several sources, or a destination spelled with a trailing slash, mean "into that directory"
+  if { ((${#SRCS[@]} > 1)) || [[ $DEST == */ ]]; } && [[ ! -d $dst ]]; then
+    mkdir -p "$dst"
+  fi
+  for s in "${SRCS[@]}"; do
+    copy_one "$s" "$dst" || rc=1
+  done
+else
+  if ((${#SRCS[@]} > 1)) && [[ ! -d $DEST ]]; then
+    printf 'scp: %s: is not a directory\n' "$DEST" >&2
+    exit 1
+  fi
+  for s in "${SRCS[@]}"; do
+    copy_one "$(map_remote "$(remote_path "$s")")" "$DEST" || rc=1
+  done
+fi
+exit "$rc"
