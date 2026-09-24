@@ -176,6 +176,7 @@ SECS=0
 
 # Command options (set from env, then flags). Prefixed OPT_ and shared by the commands.
 OPT_NAME=""
+OPT_NAME_FROM_FLAG=false
 OPT_BLUEPRINT=""
 OPT_BUNDLE=""
 OPT_AZ=""
@@ -1043,12 +1044,15 @@ os::aws() {
     done
 }
 
-# os::aws_exists_quiet NAME - true when get-instance succeeds (no retries, no side effects on AWS_* beyond the call).
+# os::aws_exists_quiet NAME - true when get-instance succeeds (no retries; AWS_OUT/AWS_ERR/AWS_CLASS are preserved).
 os::aws_exists_quiet() {
-    local saved_retries=$AWS_RETRIES rc=0
+    local saved_retries=$AWS_RETRIES saved_out=$AWS_OUT saved_err=$AWS_ERR saved_class=$AWS_CLASS rc=0
     AWS_RETRIES=0
     os::aws lightsail get-instance --instance-name "$1" || rc=$?
     AWS_RETRIES=$saved_retries
+    AWS_OUT=$saved_out
+    AWS_ERR=$saved_err
+    AWS_CLASS=$saved_class
     (( rc == 0 ))
 }
 
@@ -1289,9 +1293,9 @@ os::key_pair_ensure() {
     return 0
 }
 
-# os::static_ip_ensure INSTANCE IPNAME - allocate/attach a static IP idempotently. Sets STATIC_IP_ALLOCATED_NAME when allocated.
+# os::static_ip_ensure INSTANCE IPNAME ALLOCATE - attach a static IP idempotently; allocate it first when ALLOCATE is true.
 os::static_ip_ensure() {
-    local instance=$1 ipname=$2 rc=0 attached_to is_attached
+    local instance=$1 ipname=$2 allocate=${3:-true} rc=0 attached_to is_attached
     os::aws lightsail get-static-ip --static-ip-name "$ipname" || rc=$?
     if (( rc == 0 )); then
         attached_to=$(jq -r '.staticIp.attachedTo // empty' <<<"$AWS_OUT")
@@ -1306,6 +1310,7 @@ os::static_ip_ensure() {
         os::info "reusing unattached static IP '$ipname'"
     else
         (( rc == EX_NOTFOUND )) || os::die "$EX_AWS" "get-static-ip $ipname failed: $AWS_ERR"
+        [[ $allocate == true ]] || os::die "$EX_NOTFOUND" "static IP '$ipname' does not exist in $REGION (use --static-ip to allocate one)"
         os::info "allocating static IP '$ipname'"
         os::aws_must lightsail allocate-static-ip --static-ip-name "$ipname"
         os::op_wait "$AWS_OUT"
@@ -1421,8 +1426,7 @@ os::ports_apply() {
 
 # os::region_resolve - --region > OCTOSAIL_REGION > AWS_REGION > AWS_DEFAULT_REGION > aws configure.
 os::region_resolve() {
-    [[ -n $REGION ]] && return 0
-    REGION=${OCTOSAIL_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}
+    [[ -n $REGION ]] || REGION=${OCTOSAIL_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}
     if [[ -z $REGION ]] && os::has_cmd "$AWS_BIN"; then
         if [[ -n $PROFILE ]]; then
             REGION=$("$AWS_BIN" configure get region --profile "$PROFILE" 2>/dev/null </dev/null) || REGION=""
@@ -2438,12 +2442,12 @@ os::create_flow() {
     fi
     if [[ $OPT_STATIC_IP == true ]]; then
         ipname="octosail-$name"
-        os::static_ip_ensure "$name" "$ipname"
+        os::static_ip_ensure "$name" "$ipname" true
         if [[ $CREATE_REUSED == true ]]; then
             os::instance_tags_set "$name" "$(os::json_tags "$TAG_STATIC_IP=$ipname")"
         fi
     elif [[ -n $OPT_STATIC_IP_NAME ]]; then
-        os::static_ip_ensure "$name" "$OPT_STATIC_IP_NAME"
+        os::static_ip_ensure "$name" "$OPT_STATIC_IP_NAME" false
     fi
     if [[ $DRY_RUN != true ]]; then
         os::instance_get "$name" || os::die "$EX_NOTFOUND" "instance '$name' disappeared"
@@ -2610,12 +2614,16 @@ cmd_copy() {
     local dest="" arg remote_dest=false remote_src=0 local_src=0 rc=0
     local -a sources=() scp_args=()
     os::parse_copy_args "$@"
-    os::resolve_name
-    os::region_resolve
     if (( ${#POSITIONALS[@]} == 0 )) && [[ -n ${OCTOSAIL_COPY_SOURCE:-} ]]; then
         os::split_lines "$OCTOSAIL_COPY_SOURCE" POSITIONALS
         [[ -n ${OCTOSAIL_COPY_DESTINATION:-} ]] && POSITIONALS+=("$OCTOSAIL_COPY_DESTINATION")
     fi
+    if [[ -z $OPT_NAME ]] && (( ${#POSITIONALS[@]} >= 3 )) && [[ ${POSITIONALS[0]} != remote:* && ${POSITIONALS[0]} =~ $NAME_RE && ! -e ${POSITIONALS[0]} ]]; then
+        OPT_NAME=${POSITIONALS[0]}
+        POSITIONALS=("${POSITIONALS[@]:1}")
+    fi
+    os::resolve_name
+    os::region_resolve
     (( ${#POSITIONALS[@]} >= 2 )) || os::die "$EX_USAGE" "copy needs at least one SRC and a DEST (remote paths are written remote:PATH)"
     dest=${POSITIONALS[${#POSITIONALS[@]}-1]}
     sources=("${POSITIONALS[@]:0:${#POSITIONALS[@]}-1}")
@@ -3428,7 +3436,7 @@ Options:
   --ttl DURATION               Sets $TAG_EXPIRES for 'octosail gc' (OCTOSAIL_TTL; default 6h in Actions)
   -p, --open-ports SPEC        Firewall rule, repeatable: [PORT[-PORT]/]PROTO[@CIDR,...] (OCTOSAIL_OPEN_PORTS)
   --static-ip                  Allocate and attach a static IP named octosail-NAME (OCTOSAIL_STATIC_IP)
-  --static-ip-name NAME        Attach an existing static IP (OCTOSAIL_STATIC_IP_NAME)
+  --static-ip-name NAME        Attach an existing static IP; missing -> exit 82 (OCTOSAIL_STATIC_IP_NAME)
   --ip-address-type TYPE       dualstack | ipv4 | ipv6 (OCTOSAIL_IP_ADDRESS_TYPE)
   --if-exists MODE             reuse (default) | fail | replace (OCTOSAIL_IF_EXISTS)
   --wait / --no-wait           Wait for state running, default on (OCTOSAIL_WAIT)
@@ -3532,6 +3540,8 @@ Usage: octosail copy [--name] NAME [options] SRC... DEST
 Copy files or directories with scp. Exactly one side must be remote, written remote:PATH, e.g.
   octosail copy web1 ./dist remote:/var/www/app
   octosail copy web1 remote:/var/log/app.log ./logs/
+The first positional is the instance name unless --name or OCTOSAIL_NAME is set (then every
+positional is a path).
 
 Options:
   -n, --name NAME              Instance name (OCTOSAIL_NAME)
@@ -3963,6 +3973,7 @@ os::parse_opt_power() {
 
 os::opts_from_env_common() {
     OPT_NAME=${OCTOSAIL_NAME:-}
+    OPT_NAME_FROM_FLAG=false
     OPT_WAIT=${OCTOSAIL_WAIT:-true}
     OPT_STATE_TIMEOUT=${OCTOSAIL_STATE_TIMEOUT:-300}
     OPT_IF_MISSING=${OCTOSAIL_IF_MISSING:-ok}
@@ -4072,7 +4083,7 @@ os::take_positional_name() {
 # os::apply_positional_name - merge the positional name into OPT_NAME.
 os::apply_positional_name() {
     if (( ${#POSITIONALS[@]} )); then
-        if [[ -n $OPT_NAME && $OPT_NAME != "${POSITIONALS[0]}" ]]; then
+        if [[ $OPT_NAME_FROM_FLAG == true && $OPT_NAME != "${POSITIONALS[0]}" ]]; then
             os::die "$EX_USAGE" "conflicting instance names '--name $OPT_NAME' and '${POSITIONALS[0]}'"
         fi
         OPT_NAME=${POSITIONALS[0]}
@@ -4087,7 +4098,7 @@ os::parse_create_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) os::die "$EX_USAGE" "create does not take arguments after '--'" ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             -*) os::parse_opt_global || os::parse_opt_ssh || os::parse_opt_create || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for create (see 'octosail help create')" ;;
             *) os::die "$EX_USAGE" "create takes no positional argument; use --name NAME" ;;
         esac
@@ -4102,7 +4113,7 @@ os::parse_delete_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) os::die "$EX_USAGE" "delete does not take arguments after '--'" ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             -*) os::parse_opt_global || os::parse_opt_delete || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for delete (see 'octosail help delete')" ;;
             *) os::take_positional_name "$1" ;;
         esac
@@ -4122,7 +4133,7 @@ os::parse_run_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) shift; REST_ARGS=("$@"); break ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             -*) os::parse_opt_global || os::parse_opt_ssh || os::parse_opt_create || os::parse_opt_exec || os::parse_opt_delete || os::parse_opt_run || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for run (see 'octosail help run')" ;;
             *) os::die "$EX_USAGE" "run takes no positional argument; use --name NAME and put the command after '--'" ;;
         esac
@@ -4138,7 +4149,7 @@ os::parse_exec_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) shift; REST_ARGS=("$@"); break ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             -*) os::parse_opt_global || os::parse_opt_ssh || os::parse_opt_exec || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for exec (see 'octosail help exec')" ;;
             *) os::take_positional_name "$1" ;;
         esac
@@ -4155,7 +4166,7 @@ os::parse_copy_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) shift; POSITIONALS+=("$@"); break ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             -r|--recursive) os::opt_bool; OPT_COPY_RECURSIVE=$BOOL ;;
             --no-recursive) os::opt_flag; OPT_COPY_RECURSIVE=false ;;
             --start-if-stopped) os::opt_bool; OPT_START_IF_STOPPED=$BOOL ;;
@@ -4180,7 +4191,7 @@ os::parse_power_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) os::die "$EX_USAGE" "$verb does not take arguments after '--'" ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             -*) os::parse_opt_global || os::parse_opt_power "$verb" || os::parse_opt_ssh || os::die "$EX_USAGE" "unknown option '$OPT_FLAG' for $verb (see 'octosail help $verb')" ;;
             *) os::take_positional_name "$1" ;;
         esac
@@ -4196,7 +4207,7 @@ os::parse_status_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) os::die "$EX_USAGE" "status does not take arguments after '--'" ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             --if-missing)
                 os::opt_take
                 case $OPT_VALUE in
@@ -4222,7 +4233,7 @@ os::parse_wait_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) os::die "$EX_USAGE" "wait does not take arguments after '--'" ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             --for) os::opt_take; OPT_WAIT_FOR+=("$OPT_VALUE") ;;
             --wait-timeout) os::opt_seconds; OPT_WAIT_TIMEOUT=$SECS ;;
             --cloud-init-strict) os::opt_bool; OPT_CLOUD_INIT_STRICT=$BOOL ;;
@@ -4244,7 +4255,7 @@ os::parse_ports_args() {
         os::opt_split "$@"
         case $OPT_FLAG in
             --) os::die "$EX_USAGE" "ports does not take arguments after '--'" ;;
-            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE ;;
+            -n|--name) os::opt_take; OPT_NAME=$OPT_VALUE; OPT_NAME_FROM_FLAG=true ;;
             --open) os::opt_take; OPT_PORTS_OPEN+=("$OPT_VALUE") ;;
             --close) os::opt_take; OPT_PORTS_CLOSE+=("$OPT_VALUE") ;;
             --set) os::opt_take; OPT_PORTS_SET+=("$OPT_VALUE") ;;
@@ -4386,6 +4397,11 @@ main() {
             config=${a#*=}
         fi
     done
+    OUTPUT_FILE=${GITHUB_OUTPUT:-}
+    if os::in_actions; then
+        IN_ACTIONS=true
+    fi
+    os::out_declare exit_code exit_name octosail_version
     [[ -n $config ]] || config=${OCTOSAIL_CONFIG:-}
     if [[ -z $config ]]; then
         config=$(os::config_find)
@@ -4395,7 +4411,6 @@ main() {
     os::config_load "$config"
     os::env_normalise
     os::globals_from_env
-    os::out_declare exit_code exit_name octosail_version
     set -- "${args[@]+"${args[@]}"}"
     while (( $# )); do
         os::opt_split "$@"
