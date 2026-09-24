@@ -245,7 +245,6 @@ scp_line() {
 }
 
 @test "copy: positional NAME before SRC DEST is accepted as documented in 'help copy'" {
-  skip "BUG: cmd_copy treats every positional as a path, so 'octosail copy x SRC DEST' (the documented form) fails with 'instance name is required' (2)"
   printf 'payload\n' > "$BATS_TEST_TMPDIR/f.txt"
   run_octosail copy x "$BATS_TEST_TMPDIR/f.txt" remote:pos/f.txt
   assert_status 0

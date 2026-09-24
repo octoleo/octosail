@@ -317,7 +317,6 @@ EOF
 }
 
 @test "the retry warning for a transient create-instances failure names the original error" {
-  skip "BUG: os::aws_exists_quiet calls os::aws recursively and overwrites AWS_ERR/AWS_CLASS, so the retry warning says 'failed (notfound) ... GetInstance ... does not exist' instead of the transient create-instances error"
   export MOCK_FAIL="create-instances:1=$CONNECT_MSG"
   run_octosail create --name retried --no-wait-ssh
   assert_status 0

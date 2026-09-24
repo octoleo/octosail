@@ -157,7 +157,6 @@ create_quick() {
 }
 
 @test "config parsing: a config error still writes exit_code/exit_name to GITHUB_OUTPUT" {
-  skip "BUG: os::config_load dies before os::globals_from_env sets OUTPUT_FILE, so a config error writes no exit_code/exit_name/octosail_version outputs"
   write_config "$WORK/c.conf" "this is not valid"
   run_octosail --config "$WORK/c.conf" version
   assert_status 2
@@ -437,7 +436,6 @@ create_quick() {
 }
 
 @test "region: a --region / OCTOSAIL_REGION value that does not look like a region is exit 2" {
-  skip "BUG: os::region_resolve returns early when REGION is already set by --region or OCTOSAIL_REGION, so 'Ireland' skips the format check and reaches the AWS CLI (exit 82/85 instead of 2)"
   run_octosail status inst1 --region Ireland
   assert_status 2
   assert_stderr_contains "'Ireland' does not look like an AWS region (e.g. eu-west-1)"

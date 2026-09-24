@@ -485,8 +485,8 @@ script_runs() {
   assert_json_field "$output" '.octosail.name' x
   assert_json_field "$output" '.octosail.public_ip' 203.0.113.1
   assert_json_field "$output" '.octosail.username' ubuntu
-  [[ $(jq -r '.octosail.stdout_file' <<< "$output") == */capture/x/stdout.log ]]
-  [[ $(jq -r '.octosail.stderr_file' <<< "$output") == */capture/x/stderr.log ]]
+  [[ $(jq -r '.octosail.stdout_file' <<< "$output") == */octosail/x/stdout.log ]]
+  [[ $(jq -r '.octosail.stderr_file' <<< "$output") == */octosail/x/stderr.log ]]
   assert_gh_output stdout $'hello json\nmore'
 }
 

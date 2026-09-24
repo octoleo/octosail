@@ -558,6 +558,9 @@ runs:
         install -m 0755 "$GITHUB_ACTION_PATH/src/octosail" "$bin/octosail"
         echo "$bin" >> "$GITHUB_PATH"
         if [ "$OCTOSAIL_INSTALL_DEPENDENCIES" = "true" ]; then bash "$GITHUB_ACTION_PATH/scripts/install-deps.sh"; fi
+        if [ "${RUNNER_OS:-}" = "macOS" ] && command -v brew >/dev/null 2>&1; then
+          PATH="$(brew --prefix)/bin:$PATH"
+        fi
         "$bin/octosail" doctor --offline
         echo "octosail_version=$("$bin/octosail" version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
 

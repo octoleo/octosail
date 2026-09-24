@@ -27,8 +27,8 @@ jobs:
             sudo apt-get install -y -qq python3-yaml
           fi
           mkdir -p "$RUNNER_TEMP/actionlint"
-          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
-            | bash -s -- latest "$RUNNER_TEMP/actionlint"
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash \
+            | bash -s -- 1.7.12 "$RUNNER_TEMP/actionlint"
           echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
 
       - name: Tool versions

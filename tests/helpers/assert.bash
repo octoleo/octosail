@@ -343,3 +343,13 @@ assert_file_not_exists() {
     return 1
   fi
 }
+
+# iso_to_epoch ISO8601 - epoch seconds for a UTC timestamp like 2026-01-02T03:04:05Z (GNU and BSD safe, via jq).
+iso_to_epoch() {
+  jq -rn --arg d "$1" '$d | sub("(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"; "") | strptime("%Y-%m-%dT%H:%M:%S") | mktime'
+}
+
+# file_mode PATH - octal permission bits (GNU stat -c or BSD stat -f).
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}

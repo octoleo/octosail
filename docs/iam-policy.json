@@ -1,0 +1,45 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OctosailLightsail",
+      "Effect": "Allow",
+      "Action": [
+        "lightsail:AllocateStaticIp",
+        "lightsail:AttachStaticIp",
+        "lightsail:CloseInstancePublicPorts",
+        "lightsail:CreateInstanceSnapshot",
+        "lightsail:CreateInstances",
+        "lightsail:CreateInstancesFromSnapshot",
+        "lightsail:DeleteInstance",
+        "lightsail:DeleteKeyPair",
+        "lightsail:DetachStaticIp",
+        "lightsail:DownloadDefaultKeyPair",
+        "lightsail:GetInstance",
+        "lightsail:GetInstanceAccessDetails",
+        "lightsail:GetInstanceSnapshot",
+        "lightsail:GetInstanceState",
+        "lightsail:GetInstances",
+        "lightsail:GetKeyPair",
+        "lightsail:GetOperation",
+        "lightsail:GetStaticIp",
+        "lightsail:GetStaticIps",
+        "lightsail:ImportKeyPair",
+        "lightsail:OpenInstancePublicPorts",
+        "lightsail:PutInstancePublicPorts",
+        "lightsail:RebootInstance",
+        "lightsail:ReleaseStaticIp",
+        "lightsail:StartInstance",
+        "lightsail:StopInstance",
+        "lightsail:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OctosailDoctor",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    }
+  ]
+}

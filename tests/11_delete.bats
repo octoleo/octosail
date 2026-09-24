@@ -636,7 +636,6 @@ assert_common_outputs() {
 }
 
 @test "delete: a positional name overrides OCTOSAIL_NAME" {
-  skip "BUG: a positional name with OCTOSAIL_NAME set is refused as \"conflicting instance names '--name x' and 'y'\" (exit 2) although the documented precedence is flag > env and no --name was given"
   seed_instance x
   seed_instance y
   export OCTOSAIL_NAME=x

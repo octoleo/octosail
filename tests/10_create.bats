@@ -24,9 +24,15 @@ create_tag() {
   aws_call_arg 'lightsail create-instances' --tags | jq -r --arg k "$1" '[.[] | select(.key == $k) | .value] | first // empty'
 }
 
-# gen_pubkey FILE_BASENAME : generate a throwaway ed25519 key pair under $BATS_TEST_TMPDIR, prints the .pub path.
+# gen_pubkey FILE_BASENAME [TYPE] : generate a throwaway key pair (ed25519 by default) under $BATS_TEST_TMPDIR,
+# prints the .pub path.
 gen_pubkey() {
-  ssh-keygen -q -t ed25519 -N '' -C "$1" -f "$BATS_TEST_TMPDIR/$1" > /dev/null
+  local type=${2:-ed25519}
+  if [[ $type == rsa ]]; then
+    ssh-keygen -q -t rsa -b 2048 -N '' -C "$1" -f "$BATS_TEST_TMPDIR/$1" > /dev/null
+  else
+    ssh-keygen -q -t "$type" -N '' -C "$1" -f "$BATS_TEST_TMPDIR/$1" > /dev/null
+  fi
   printf '%s\n' "$BATS_TEST_TMPDIR/$1.pub"
 }
 
@@ -87,7 +93,7 @@ gen_pubkey() {
   assert_status 0
   val=$(create_tag octosail:expires-at)
   [[ $val =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-  epoch=$(date -u -d "$val" +%s)
+  epoch=$(iso_to_epoch "$val")
   (( epoch >= before + 3600 - 120 && epoch <= after + 3600 + 120 ))
   assert_gh_output expires_at "$val"
 }
@@ -103,7 +109,7 @@ gen_pubkey() {
   [[ $(create_tag octosail:run-id) == 7 ]]
   [[ $(create_tag octosail:repository) == o/r ]]
   val=$(create_tag octosail:expires-at)
-  epoch=$(date -u -d "$val" +%s)
+  epoch=$(iso_to_epoch "$val")
   (( epoch >= before + 21600 - 120 && epoch <= after + 21600 + 120 ))
   assert_gh_output name octosail-7-1
   assert_gh_output created true
@@ -225,15 +231,15 @@ gen_pubkey() {
   assert_gh_output state running
 }
 
-@test "create: --if-exists replace of a protected instance fails with 88 (replace failed) and creates nothing" {
+@test "create: --if-exists replace of a protected instance is refused with 87 and creates nothing" {
   seed_instance x '[{"key":"octosail:managed","value":"true"},{"key":"octosail:protected","value":"true"}]'
   run_octosail create --name x --if-exists replace --no-wait-ssh
-  assert_status 88
-  assert_gh_output exit_name CLEANUP
+  assert_status 87
+  assert_gh_output exit_name REFUSED
   assert_aws_not_called 'lightsail delete-instance'
   assert_aws_not_called 'lightsail create-instances'
   assert_stderr_contains "is tagged octosail:protected=true; refusing to delete it"
-  assert_stderr_contains "could not delete the existing instance 'x' (exit 87)"
+  assert_stderr_contains "instance 'x' exists and may not be replaced"
 }
 
 @test "create: --if-exists with an unknown mode is a usage error" {
@@ -434,7 +440,6 @@ gen_pubkey() {
 }
 
 @test "create: --static-ip-name with a missing static IP exits 82 instead of allocating one" {
-  skip "BUG: --static-ip-name is documented as 'attach an existing static IP' but os::static_ip_ensure allocates a missing one (untagged, so delete never releases it)"
   run_octosail create --name x --static-ip-name nope --no-wait-ssh
   assert_status 82
   assert_aws_not_called 'lightsail allocate-static-ip'
@@ -499,9 +504,10 @@ gen_pubkey() {
 }
 
 @test "create: a different public key under an existing key pair name exits 89" {
+  # RSA keys: both fingerprint styles (OpenSSH MD5 and DER MD5) can be computed, so a mismatch is a conflict.
   local pub1 pub2
-  pub1=$(gen_pubkey k1)
-  pub2=$(gen_pubkey k2)
+  pub1=$(gen_pubkey k1 rsa)
+  pub2=$(gen_pubkey k2 rsa)
   run_octosail create --name first --public-key-file "$pub1" --key-pair mykey --no-wait-ssh
   assert_status 0
   : > "$MOCK_LOG"
@@ -511,6 +517,20 @@ gen_pubkey() {
   assert_aws_not_called 'lightsail import-key-pair'
   assert_aws_not_called 'lightsail create-instances'
   assert_stderr_contains "key pair 'mykey' exists with a different fingerprint"
+}
+
+@test "create: an ed25519 key whose DER fingerprint cannot be computed is reused by name with a warning" {
+  local pub1 pub2
+  pub1=$(gen_pubkey e1)
+  pub2=$(gen_pubkey e2)
+  run_octosail create --name first --public-key-file "$pub1" --key-pair edkey --no-wait-ssh
+  assert_status 0
+  : > "$MOCK_LOG"
+  run_octosail create --name x --public-key-file "$pub2" --key-pair edkey --no-wait-ssh
+  assert_status 0
+  assert_aws_not_called 'lightsail import-key-pair'
+  assert_aws_called 'lightsail create-instances' '--key-pair-name' 'edkey'
+  assert_stderr_contains "reused by name"
 }
 
 @test "create: --public-key-file that is not a public key is a usage error" {
