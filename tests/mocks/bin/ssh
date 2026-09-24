@@ -202,15 +202,21 @@ fi
 
 remote_bin=$(cd "$(dirname "${BASH_SOURCE[0]}")/../remote-bin" && pwd)
 if [[ ${CLOUD_INIT_MOCK_STATUS:-} == absent ]]; then
-  # "absent": no cloud-init anywhere on the remote PATH (drop host dirs that carry one too)
-  new_path=""
-  IFS=: read -r -a path_parts <<< "$PATH"
-  for d in "${path_parts[@]}"; do
-    [[ -n $d ]] || continue
-    [[ -x $d/cloud-init ]] && continue
-    new_path+="${new_path:+:}$d"
-  done
-  PATH="$new_path"
+  # "absent": no cloud-init anywhere on the remote PATH. Hosts (GitHub runners included) ship a real
+  # cloud-init in /usr/bin, and dropping that directory would also drop sh and sed, so a private bin
+  # directory holding links to the common tools and to the fake sudo becomes the only PATH entry.
+  shim="${MOCK_STATE_DIR:-${TMPDIR:-/tmp}}/absent-bin"
+  if [[ ! -d $shim ]]; then
+    mkdir -p "$shim"
+    for tool in sh bash dash env sed awk head tail tr grep cat echo printf sleep timeout test true false \
+      cut sort uniq wc mkdir rm cp mv ls dirname basename date id uname hostname which touch chmod expr \
+      stat find xargs tee readlink; do
+      t=$(command -v "$tool" 2> /dev/null) || continue
+      ln -sf "$t" "$shim/$tool"
+    done
+    ln -sf "$remote_bin/sudo" "$shim/sudo"
+  fi
+  PATH="$shim"
 else
   PATH="$remote_bin:$PATH"
 fi
